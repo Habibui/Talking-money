@@ -83,6 +83,15 @@ def main() -> int:
             logger.warning("Пропускаем (не удалось перевести): %s — %s", item["source"], item["title"])
             continue
 
+        if not translated.get("relevant", True):
+            # не подходит по теме (лайфстайл/спорт-как-бизнес/политика без
+            # экономической связки и т.п.) — считаем обработанным, чтобы не
+            # пытаться снова, но в канал не публикуем
+            logger.info("Пропускаем (не по теме канала): %s — %s", item["source"], item["title"])
+            state.mark_posted(st, [item])
+            state.save_state(st)
+            continue
+
         text = telegram_bot.build_message(item, translated)
 
         if DRY_RUN:

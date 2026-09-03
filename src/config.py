@@ -30,7 +30,8 @@ SOURCES = [
     {
         "name": "CNBC",
         "type": "rss",
-        "url": "https://www.cnbc.com/id/10001147/device/rss/rss.html",  # Business
+        # Economy — уже, чем общий Business (меньше спорта-как-бизнеса и лайфстайла)
+        "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
     },
     {
         "name": "NYT",
@@ -41,6 +42,17 @@ SOURCES = [
         "name": "BBC",
         "type": "rss",
         "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+    },
+    {
+        "name": "WSJ",
+        "type": "rss",
+        # Markets — курсы, облигации, сырьё, реакции рынков на решения ЦБ/политиков
+        "url": "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain",
+    },
+    {
+        "name": "MarketWatch",
+        "type": "rss",
+        "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
     },
     {
         "name": "Bloomberg",
