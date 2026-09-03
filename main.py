@@ -77,11 +77,13 @@ def main() -> int:
         return 0
 
     posted_count = 0
+    translate_failures = 0
     for item in new_items:
-        # пробуем подтянуть официальный лид-абзац со страницы самой статьи
-        # (og:description) — он обычно содержательнее, чем то, что дал
-        # RSS/телеграм; если не получилось — работаем с тем summary, что уже
-        # есть, пайплайн из-за этого не должен падать
+        # пробуем прочитать саму статью (полный текст через trafilatura,
+        # либо og:description как запасной вариант) — это даёт модели больше
+        # материала для собственной выжимки, чем голый RSS/телеграм-summary;
+        # если не получилось — работаем с тем summary, что уже есть, пайплайн
+        # из-за этого не должен падать
         richer_lead = sources.fetch_article_lead(item["link"])
         if richer_lead:
             item["summary"] = richer_lead
@@ -89,6 +91,7 @@ def main() -> int:
         translated = llm.translate_and_comment(item)
         if translated is None:
             logger.warning("Пропускаем (не удалось перевести): %s — %s", item["source"], item["title"])
+            translate_failures += 1
             continue
 
         if not translated.get("relevant", True):
@@ -118,6 +121,21 @@ def main() -> int:
             logger.warning("Пропускаем (не удалось отправить в Telegram): %s — %s", item["source"], item["title"])
 
     logger.info("Готово. Опубликовано постов: %d из %d новых.", posted_count, len(new_items))
+
+    if translate_failures > 0 and translate_failures == len(new_items):
+        # ни одна новость не перевелась — это не "модели не повезло на одном
+        # заголовке", а похоже на системный сбой (например, не оплачен/истёк
+        # ключ Anthropic). Сам перевод ошибку проглатывает и возвращает None,
+        # поэтому явно проваливаем запуск, чтобы сработало уведомление о
+        # сбое (см. .github/workflows/publish.yml, шаг "Уведомить о сбое") —
+        # иначе публикации молча прекратятся, а мы об этом не узнаем.
+        logger.error(
+            "Все %d новых заголовков не удалось перевести — похоже на системный сбой "
+            "(например, не оплачен/истёк ключ Anthropic), а не на единичную ошибку.",
+            translate_failures,
+        )
+        return 1
+
     return 0
 
 
