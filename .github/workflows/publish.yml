@@ -2,8 +2,10 @@ name: Публикация новостей
 
 on:
   schedule:
-    # каждый час в 5-ю минуту (сдвиг от ровного часа — так надёжнее с
-    # очередями GitHub Actions, которые иногда задерживают запуск на ":00")
+    # каждые 15 минут — для более свежих публикаций. GitHub всё равно не
+    # гарантирует точное время срабатывания (best-effort, возможны задержки
+    # при высокой нагрузке на Actions), но при более частом опросе среднее
+    # отставание от оригинала меньше.
     - cron: "*/15 * * * *"
   workflow_dispatch: {}  # позволяет запустить вручную из вкладки Actions
 
@@ -35,6 +37,20 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python main.py
+
+      - name: Уведомить о сбое
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_ADMIN_CHAT_ID" ]; then
+            echo "TELEGRAM_ADMIN_CHAT_ID не задан — пропускаем личное уведомление"
+            exit 0
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_ADMIN_CHAT_ID}" \
+            -d text="⚠️ talkuyut-dengi: пайплайн упал с ошибкой. Лог: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Закоммитить обновлённое состояние (posted.json)
         run: |

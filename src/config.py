@@ -69,3 +69,4 @@ STATE_PATH = os.path.join(os.path.dirname(__file__), "..", "state", "posted.json
 MAX_STATE_IDS = 3000  # сколько последних id хранить в state, чтобы файл не рос бесконечно
 MAX_ITEMS_PER_SOURCE_PER_RUN = 10  # защита от аномального всплеска (сломанный фид и т.п.)
 REQUEST_TIMEOUT = 20  # секунд, для http-запросов
+MAX_ARTICLE_CHARS = 6000  # ограничение на длину текста статьи, который отдаём Claude

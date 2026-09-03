@@ -61,7 +61,8 @@ comment_ru тогда можно оставить короткими/пусты�
 3. Не используй слова и обороты, которые выдают машинный текст: "в целом", \
 "стоит отметить", "таким образом", "данная новость" и подобные штампы.
 
-Отвечай СТРОГО в формате JSON, без markdown-разметки вокруг:
+Отвечай СТРОГО в формате JSON — и ничего, кроме этого JSON-объекта: без
+markdown-разметки вокруг, без пояснений до или после, без повторов:
 {"relevant": true, "headline_ru": "...", "comment_ru": "..."}
 """
 
@@ -98,7 +99,10 @@ def translate_and_comment(item: dict) -> dict | None:
             if raw.lower().startswith("json"):
                 raw = raw[4:]
 
-        data = json.loads(raw)
+        # берём только первый валидный JSON-объект и игнорируем всё, что
+        # модель могла добавить после него (лишний текст/пояснение) —
+        # обычный json.loads падает на этом с "Extra data"
+        data, _ = json.JSONDecoder().raw_decode(raw)
         if "headline_ru" not in data or "comment_ru" not in data:
             raise ValueError(f"В ответе модели нет нужных ключей: {data}")
         data.setdefault("relevant", True)  # старые/неполные ответы считаем релевантными

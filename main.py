@@ -78,6 +78,14 @@ def main() -> int:
 
     posted_count = 0
     for item in new_items:
+        # пробуем подтянуть официальный лид-абзац со страницы самой статьи
+        # (og:description) — он обычно содержательнее, чем то, что дал
+        # RSS/телеграм; если не получилось — работаем с тем summary, что уже
+        # есть, пайплайн из-за этого не должен падать
+        richer_lead = sources.fetch_article_lead(item["link"])
+        if richer_lead:
+            item["summary"] = richer_lead
+
         translated = llm.translate_and_comment(item)
         if translated is None:
             logger.warning("Пропускаем (не удалось перевести): %s — %s", item["source"], item["title"])
