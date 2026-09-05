@@ -88,6 +88,20 @@ def main() -> int:
         if richer_lead:
             item["summary"] = richer_lead
 
+        # логируем, что именно уходит модели на вход — иначе при подозрении
+        # на выдумку факта нет способа проверить, что реально было в основе
+        # перевода/комментария; урезаем до 500 символов, чтобы не раздувать
+        # лог, но с указанием полной длины текста
+        preview = item["summary"][:500]
+        if len(item["summary"]) > 500:
+            preview += "…"
+        logger.info(
+            "Вход для %s (%d символов): %s",
+            item["source"],
+            len(item["summary"]),
+            preview,
+        )
+
         translated = llm.translate_and_comment(item)
         if translated is None:
             logger.warning("Пропускаем (не удалось перевести): %s — %s", item["source"], item["title"])

@@ -21,6 +21,17 @@ HEADERS = {
     "+https://t.me/talkuyut_dengi)"
 }
 
+# Для запроса страницы самой статьи (fetch_article_lead) некоторые издания
+# (замечено на NYT — 403 Forbidden на 100% ссылок) блокируют явно
+# представившихся ботов, но открывают ту же самую публичную страницу любому
+# обычному браузеру. Это не обход пейволла и не доступ к чему-то скрытому —
+# страница та же самая, что видит анонимный человек с браузером; мы просто не
+# привлекаем внимание блокировщика ботов заголовком User-Agent.
+ARTICLE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+}
+
 
 def _clean_text(text: str) -> str:
     text = html.unescape(text or "")
@@ -47,7 +58,7 @@ def fetch_article_lead(url: str) -> str:
     При любой ошибке или пустом результате возвращает "" — вызывающий код
     в этом случае просто оставляет прежний summary (из RSS/телеграма)."""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=config.REQUEST_TIMEOUT)
+        resp = requests.get(url, headers=ARTICLE_HEADERS, timeout=config.REQUEST_TIMEOUT)
         resp.raise_for_status()
     except Exception as exc:
         logger.warning("Не удалось получить страницу статьи %s: %s", url, exc)
