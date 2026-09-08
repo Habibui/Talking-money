@@ -78,7 +78,8 @@ def main() -> int:
     if not is_night:
         night_queue = state.load_night_queue()
         if night_queue:
-            digest_messages = telegram_bot.build_digest_messages(night_queue)
+            intro_ru = llm.summarize_night(night_queue)
+            digest_messages = telegram_bot.build_digest_messages(night_queue, intro_ru)
             if DRY_RUN:
                 for i, msg in enumerate(digest_messages, 1):
                     logger.info("[DRY_RUN] Дайджест %d/%d:\n%s\n", i, len(digest_messages), msg)

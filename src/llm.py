@@ -77,6 +77,50 @@ markdown-разметки вокруг, без пояснений до или п
 """
 
 
+DIGEST_INTRO_SYSTEM_PROMPT = """\
+Ты — автор телеграм-канала "О чём talk'уют деньги" (@talkuyut_dengi) про \
+экономические и бизнес-новости. Фирменный тон канала — колкий, слегка \
+провокационный, с иронией и сарказмом, без канцелярита и без "как ИИ-модель".
+
+Тебе дают список заголовков новостей, которые вышли ночью и публикуются \
+утром одним дайджестом. Напиши ОДНУ короткую фразу-интро для этого дайджеста \
+(не больше 15-20 слов), в этом же фирменном тоне — она свяжет новости общим \
+настроением/темой именно этой ночи, а не перескажет заголовки по отдельности. \
+Не используй шаблонное "Пока вы спали" как есть, если можно сформулировать \
+живее и конкретнее под содержание именно этих новостей. Без кавычек вокруг \
+всей фразы, без точки в конце необязательно, без markdown-разметки.
+
+Ответь ТОЛЬКО этой фразой, без пояснений до или после."""
+
+
+def summarize_night(queue_items: list) -> str | None:
+    """queue_items — список dict с ключом headline_ru (уже переведённые
+    заголовки ночных новостей). Возвращает короткую фразу-интро для дайджеста
+    в фирменном тоне канала, либо None при ошибке (тогда main.py использует
+    нейтральный запасной заголовок — сама отправка дайджеста от этого не
+    должна зависеть)."""
+    if not queue_items:
+        return None
+
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    headlines = "\n".join(f"- {it['headline_ru']}" for it in queue_items)
+
+    try:
+        response = client.messages.create(
+            model=config.LLM_MODEL,
+            max_tokens=100,
+            system=DIGEST_INTRO_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": headlines}],
+        )
+        raw = "".join(
+            block.text for block in response.content if getattr(block, "type", "") == "text"
+        ).strip()
+        return raw.strip('"«» ') or None
+    except Exception as exc:
+        logger.error("Не удалось получить интро для ночного дайджеста: %s", exc)
+        return None
+
+
 def translate_and_comment(item: dict) -> dict | None:
     """item — {source, title, summary, link}. Возвращает
     {"relevant": bool, "headline_ru": ..., "comment_ru": ...} или None при ошибке

@@ -36,26 +36,33 @@ def build_message(item: dict, translated: dict) -> str:
     return _news_block(item["source"], translated["headline_ru"], translated["comment_ru"], item["link"])
 
 
-def build_digest_messages(queue_items: list) -> list:
+def build_digest_messages(queue_items: list, intro_ru: str | None = None) -> list:
     """Собирает накопленные за ночь новости в один пост (или несколько, если
     не влезает в лимит Telegram). queue_items — список dict с ключами
-    source/headline_ru/comment_ru/link (см. state.append_to_night_queue)."""
+    source/headline_ru/comment_ru/link (см. state.append_to_night_queue).
+    intro_ru — фраза-интро в фирменном тоне канала (см. llm.summarize_night);
+    если не передана или пустая — используется нейтральный заголовок."""
     blocks = [
         _news_block(it["source"], it["headline_ru"], it["comment_ru"], it["link"])
         for it in queue_items
     ]
 
     divider = "\n\n———\n\n"
+    intro = _esc(intro_ru) if intro_ru else "Пока вы спали"
 
     def header(part_no: int, total: int) -> str:
+        text = intro if part_no == 1 else "Продолжение ночного дайджеста"
         suffix = f" ({part_no}/{total})" if total > 1 else ""
-        return f"<b>Пока вы спали{suffix}:</b>\n\n"
+        return f"<b>{text}{suffix}:</b>\n\n"
 
     # раскладываем блоки по частям так, чтобы каждая часть влезала в лимит;
     # номер части в заголовке узнаем только после того, как разложили всё —
     # поэтому сначала считаем без заголовка (с запасом на него), потом
-    # проставляем финальные заголовки с правильным total
-    header_budget = len(header(9, 9))  # с запасом, "(9/9)" длиннее реальных вариантов
+    # проставляем финальные заголовки с правильным total. Запас берём по
+    # худшему из двух вариантов заголовка (интро может быть длиннее, чем
+    # "Продолжение ночного дайджеста", если модель написала фразу подлиннее)
+    # и с большим total "про запас", чтобы "(N/99)" точно не короче реального.
+    header_budget = max(len(header(1, 99)), len(header(2, 99)))
     parts: list = [[]]
     current_len = header_budget
     for block in blocks:
