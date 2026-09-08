@@ -59,3 +59,33 @@ def mark_posted(state: dict, items: list) -> None:
     for item in items:
         item_id = item.get("id") or compute_id(item["source"], item["link"])
         state["ids"].append(item_id)
+
+
+# --- Ночная очередь (для утреннего дайджеста) --------------------------------
+# Отдельный файл (не posted.json) — так дедуп по id и содержимое дайджеста не
+# смешиваются, и очередь можно спокойно очистить, не трогая историю id.
+
+
+def load_night_queue() -> list:
+    if not os.path.exists(config.NIGHT_QUEUE_PATH):
+        return []
+    with open(config.NIGHT_QUEUE_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_night_queue(queue: list) -> None:
+    os.makedirs(os.path.dirname(config.NIGHT_QUEUE_PATH), exist_ok=True)
+    with open(config.NIGHT_QUEUE_PATH, "w", encoding="utf-8") as f:
+        json.dump(queue, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def append_to_night_queue(source: str, headline_ru: str, comment_ru: str, link: str) -> None:
+    queue = load_night_queue()
+    queue.append({
+        "source": source,
+        "headline_ru": headline_ru,
+        "comment_ru": comment_ru,
+        "link": link,
+    })
+    save_night_queue(queue)

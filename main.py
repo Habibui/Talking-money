@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-from src import config, llm, sources, state, telegram_bot
+from src import config, llm, sources, state, telegram_bot, timeutil
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +69,37 @@ def main() -> int:
         )
         return 0
 
+    is_night = timeutil.is_night_msk()
+    logger.info("Сейчас %s по МСК", "ночь (копим в очередь)" if is_night else "день (публикуем сразу)")
+
+    # Если сейчас день и с ночи осталась накопленная очередь — сначала
+    # отправляем её одним дайджестом, до обработки текущих новых заголовков
+    # этого запуска (чтобы порядок в канале был хронологический).
+    if not is_night:
+        night_queue = state.load_night_queue()
+        if night_queue:
+            digest_messages = telegram_bot.build_digest_messages(night_queue)
+            if DRY_RUN:
+                for i, msg in enumerate(digest_messages, 1):
+                    logger.info("[DRY_RUN] Дайджест %d/%d:\n%s\n", i, len(digest_messages), msg)
+                state.save_night_queue([])
+                logger.info("[DRY_RUN] Дайджест из %d новостей 'отправлен'.", len(night_queue))
+            else:
+                sent_all = True
+                for msg in digest_messages:
+                    if not telegram_bot.send_message(msg):
+                        sent_all = False
+                        logger.warning(
+                            "Не удалось отправить часть дайджеста — очередь оставляем, "
+                            "попробуем снова следующим запуском."
+                        )
+                        break
+                    time.sleep(SEND_DELAY_SECONDS)
+                if sent_all:
+                    state.save_night_queue([])
+                    logger.info("Дайджест отправлен: %d новостей, %d сообщени(е/я/й).",
+                                len(night_queue), len(digest_messages))
+
     new_items = state.filter_new_items(st, items)
     logger.info("Новых (ещё не опубликованных) заголовков: %d", len(new_items))
 
@@ -115,6 +146,22 @@ def main() -> int:
             logger.info("Пропускаем (не по теме канала): %s — %s", item["source"], item["title"])
             state.mark_posted(st, [item])
             state.save_state(st)
+            continue
+
+        if is_night:
+            # Ночью (23:00-08:00 МСК) не публикуем по одной сразу — копим в
+            # очередь, она уйдёт одним дайджестом первым дневным запуском.
+            # Сохраняем очередь ДО отметки "опубликовано" в основном state —
+            # если пайплайн упадёт между этими двумя шагами, лучше повторно
+            # обработать заголовок (дубль в очереди не страшнее дубля поста),
+            # чем молча потерять уже переведённую новость.
+            state.append_to_night_queue(
+                item["source"], translated["headline_ru"], translated["comment_ru"], item["link"]
+            )
+            state.mark_posted(st, [item])
+            state.save_state(st)
+            posted_count += 1
+            logger.info("В ночную очередь: %s — %s", item["source"], item["title"])
             continue
 
         text = telegram_bot.build_message(item, translated)
