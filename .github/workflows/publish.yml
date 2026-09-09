@@ -64,17 +64,20 @@ jobs:
             -d chat_id="${TELEGRAM_ADMIN_CHAT_ID}" \
             -d text="⚠️ talkuyut-dengi: пайплайн упал с ошибкой. Лог: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-      - name: Закоммитить обновлённое состояние (posted.json, night_queue.json)
+      - name: Закоммитить обновлённое состояние
         run: |
           git config user.name "talkuyut-dengi-bot"
           git config user.email "actions@users.noreply.github.com"
           git add state/posted.json
-          # night_queue.json создаётся пайплайном только при первой ночной
-          # новости — если файла ещё нет, не валим шаг на этом (`if`, а не
-          # `&&`, потому что shell тут запускается с `set -e`, и голая `&&`-
-          # цепочка с проваленным условием слева тоже завершила бы скрипт)
-          if [ -f state/night_queue.json ]; then
-            git add state/night_queue.json
-          fi
+          # Остальные файлы состояния создаются пайплайном по мере надобности
+          # (не с первого запуска) — если файла ещё нет, не валим шаг на этом
+          # (`if`, а не `&&`, потому что shell тут запускается с `set -e`, и
+          # голая `&&`-цепочка с проваленным условием слева тоже завершила бы
+          # скрипт)
+          for f in state/digest_queue.json state/digest_meta.json state/recent_posts.json; do
+            if [ -f "$f" ]; then
+              git add "$f"
+            fi
+          done
           git diff --cached --quiet || git commit -m "chore: обновить state [skip ci]"
           git push

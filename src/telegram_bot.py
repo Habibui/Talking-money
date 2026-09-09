@@ -37,21 +37,23 @@ def build_message(item: dict, translated: dict) -> str:
 
 
 def build_digest_messages(queue_items: list, intro_ru: str | None = None) -> list:
-    """Собирает накопленные за ночь новости в один пост (или несколько, если
+    """Собирает накопленные рутинные новости в один пост (или несколько, если
     не влезает в лимит Telegram). queue_items — список dict с ключами
-    source/headline_ru/comment_ru/link (см. state.append_to_night_queue).
-    intro_ru — фраза-интро в фирменном тоне канала (см. llm.summarize_night);
-    если не передана или пустая — используется нейтральный заголовок."""
+    source/headline_ru/comment_ru/link (см. state.append_to_digest_queue).
+    intro_ru — фраза-интро в фирменном тоне канала (см. llm.summarize_digest);
+    если не передана или пустая — используется нейтральный заголовок. Дайджест
+    может уходить и днём, и утром (см. config.DIGEST_FLUSH_HOURS_MSK) — заголовок
+    по умолчанию не привязан к времени суток."""
     blocks = [
         _news_block(it["source"], it["headline_ru"], it["comment_ru"], it["link"])
         for it in queue_items
     ]
 
     divider = "\n\n———\n\n"
-    intro = _esc(intro_ru) if intro_ru else "Пока вы спали"
+    intro = _esc(intro_ru) if intro_ru else "Что вы пропустили"
 
     def header(part_no: int, total: int) -> str:
-        text = intro if part_no == 1 else "Продолжение ночного дайджеста"
+        text = intro if part_no == 1 else "Продолжение дайджеста"
         suffix = f" ({part_no}/{total})" if total > 1 else ""
         return f"<b>{text}{suffix}:</b>\n\n"
 

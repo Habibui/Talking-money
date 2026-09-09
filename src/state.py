@@ -1,5 +1,7 @@
 """
-Хранение уже опубликованных новостей — чтобы не постить одно и то же дважды.
+Хранение состояния пайплайна: что уже опубликовано (дедуп по id), очередь
+рутинных новостей на ближайший дайджест, и недавние посты (для смысловой
+проверки на дубли/апдейты между разными источниками).
 
 Формат state/posted.json:
 {
@@ -14,6 +16,7 @@
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 from . import config
 
@@ -61,31 +64,94 @@ def mark_posted(state: dict, items: list) -> None:
         state["ids"].append(item_id)
 
 
-# --- Ночная очередь (для утреннего дайджеста) --------------------------------
+# --- Очередь рутинных новостей (для ближайшего дайджеста) --------------------
 # Отдельный файл (не posted.json) — так дедуп по id и содержимое дайджеста не
 # смешиваются, и очередь можно спокойно очистить, не трогая историю id.
 
 
-def load_night_queue() -> list:
-    if not os.path.exists(config.NIGHT_QUEUE_PATH):
+def load_digest_queue() -> list:
+    if not os.path.exists(config.DIGEST_QUEUE_PATH):
         return []
-    with open(config.NIGHT_QUEUE_PATH, "r", encoding="utf-8") as f:
+    with open(config.DIGEST_QUEUE_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_night_queue(queue: list) -> None:
-    os.makedirs(os.path.dirname(config.NIGHT_QUEUE_PATH), exist_ok=True)
-    with open(config.NIGHT_QUEUE_PATH, "w", encoding="utf-8") as f:
+def save_digest_queue(queue: list) -> None:
+    os.makedirs(os.path.dirname(config.DIGEST_QUEUE_PATH), exist_ok=True)
+    with open(config.DIGEST_QUEUE_PATH, "w", encoding="utf-8") as f:
         json.dump(queue, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
 
-def append_to_night_queue(source: str, headline_ru: str, comment_ru: str, link: str) -> None:
-    queue = load_night_queue()
+def append_to_digest_queue(source: str, headline_ru: str, comment_ru: str, link: str) -> None:
+    queue = load_digest_queue()
     queue.append({
         "source": source,
         "headline_ru": headline_ru,
         "comment_ru": comment_ru,
         "link": link,
     })
-    save_night_queue(queue)
+    save_digest_queue(queue)
+
+
+# --- Метаданные дайджеста (когда флашили в последний раз) --------------------
+# Нужно, чтобы за один и тот же час (например, 12:00-12:59, за который пайплайн
+# успеет отработать 3-4 раза) дайджест ушёл ровно один раз, а не при каждом
+# запуске внутри этого часа.
+
+
+def load_digest_meta() -> dict:
+    if not os.path.exists(config.DIGEST_META_PATH):
+        return {"last_flush_key": None}
+    with open(config.DIGEST_META_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("last_flush_key", None)
+    return data
+
+
+def save_digest_meta(meta: dict) -> None:
+    os.makedirs(os.path.dirname(config.DIGEST_META_PATH), exist_ok=True)
+    with open(config.DIGEST_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+# --- Недавние посты (контекст для проверки на дубли/апдейты) -----------------
+# Не только заголовок+ссылка, но и уже написанный комментарий — в нём уже
+# сжаты ключевые факты (см. системный промпт llm.py), этого достаточно модели,
+# чтобы понять, действительно ли новая новость добавляет что-то новое, или это
+# то же самое, что уже публиковали (пусть и с другого источника).
+
+
+def load_recent_posts() -> list:
+    if not os.path.exists(config.RECENT_POSTS_PATH):
+        return []
+    with open(config.RECENT_POSTS_PATH, "r", encoding="utf-8") as f:
+        posts = json.load(f)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=config.RECENT_POSTS_MAX_AGE_HOURS)
+    fresh = [p for p in posts if datetime.fromisoformat(p["posted_at"]) >= cutoff]
+    return fresh[-config.RECENT_POSTS_MAX_COUNT:]
+
+
+def save_recent_posts(posts: list) -> None:
+    posts = posts[-config.RECENT_POSTS_MAX_COUNT:]
+    os.makedirs(os.path.dirname(config.RECENT_POSTS_PATH), exist_ok=True)
+    with open(config.RECENT_POSTS_PATH, "w", encoding="utf-8") as f:
+        json.dump(posts, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def append_recent_post(posts: list, source: str, headline_ru: str, comment_ru: str) -> list:
+    """Добавляет запись в переданный в память список (не перечитывает файл —
+    вызывающий код сам ведёт posts в течение всего прогона, чтобы более ранние
+    новости этого же запуска тоже участвовали в сравнении для более поздних)
+    и сразу сохраняет на диск. Возвращает обновлённый список."""
+    posts = posts + [{
+        "source": source,
+        "headline_ru": headline_ru,
+        "comment_ru": comment_ru,
+        "posted_at": datetime.now(timezone.utc).isoformat(),
+    }]
+    save_recent_posts(posts)
+    return posts

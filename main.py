@@ -1,14 +1,20 @@
 """
-Точка входа пайплайна. Запускается раз в час через GitHub Actions
-(см. .github/workflows/publish.yml).
+Точка входа пайплайна. Запускается каждые ~15 минут через внешний
+Cloudflare Worker (workflow_dispatch), с резервным редким schedule: в самом
+GitHub Actions (см. .github/workflows/publish.yml).
 
 Логика:
 1. Собрать свежие заголовки со всех источников.
 2. Если это самый первый запуск (state пустой) — просто запомнить текущие
    заголовки как "уже виденные" и ничего не постить (иначе в канал сразу
    улетит вся история фидов).
-3. Иначе — для каждого нового (ещё не опубликованного) заголовка получить
-   перевод + комментарий от Claude и опубликовать в канал.
+3. Если сейчас "час флаша" (см. config.DIGEST_FLUSH_HOURS_MSK) и с прошлого
+   раза накопилась очередь рутинных новостей — сначала отправить её одним
+   дайджестом.
+4. Для каждого нового (ещё не опубликованного) заголовка получить перевод +
+   комментарий от Claude (модель заодно решает: подходит ли новость каналу,
+   это дубль/апдейт уже известной истории или нет, и насколько она "громкая").
+   Громкое публикуется сразу; рутина копится в очередь до ближайшего дайджеста.
 
 Переменная окружения DRY_RUN=1 — прогон без реальной отправки в Telegram
 (текст постов печатается в лог), удобно для проверки перед боевым запуском.
@@ -46,6 +52,61 @@ def check_config() -> bool:
     return True
 
 
+def maybe_flush_digest() -> None:
+    """Если сейчас час из config.DIGEST_FLUSH_HOURS_MSK и в этот час ещё не
+    флашили — отправляет накопленную очередь рутинных новостей одним
+    дайджестом (если она не пуста), и в любом случае отмечает этот час как
+    обработанный, чтобы не пытаться флашить повторно на каждом из нескольких
+    запусков внутри одного и того же часа."""
+    current_hour = timeutil.hour_msk()
+    flush_key = timeutil.flush_key_msk()
+    is_flush_hour = current_hour in config.DIGEST_FLUSH_HOURS_MSK
+
+    meta = state.load_digest_meta()
+    if not is_flush_hour or meta.get("last_flush_key") == flush_key:
+        return
+
+    digest_queue = state.load_digest_queue()
+    if not digest_queue:
+        # нечего слать, но час всё равно отмечаем — иначе следующий запуск
+        # в этом же часе (через 15 минут) будет проверять это же условие снова
+        meta["last_flush_key"] = flush_key
+        state.save_digest_meta(meta)
+        return
+
+    intro_ru = llm.summarize_digest(digest_queue)
+    digest_messages = telegram_bot.build_digest_messages(digest_queue, intro_ru)
+
+    if DRY_RUN:
+        for i, msg in enumerate(digest_messages, 1):
+            logger.info("[DRY_RUN] Дайджест %d/%d:\n%s\n", i, len(digest_messages), msg)
+        state.save_digest_queue([])
+        meta["last_flush_key"] = flush_key
+        state.save_digest_meta(meta)
+        logger.info("[DRY_RUN] Дайджест из %d новостей 'отправлен'.", len(digest_queue))
+        return
+
+    sent_all = True
+    for msg in digest_messages:
+        if not telegram_bot.send_message(msg):
+            sent_all = False
+            logger.warning(
+                "Не удалось отправить часть дайджеста — очередь и час флаша "
+                "оставляем как есть, попробуем снова следующим запуском."
+            )
+            break
+        time.sleep(SEND_DELAY_SECONDS)
+
+    if sent_all:
+        state.save_digest_queue([])
+        meta["last_flush_key"] = flush_key
+        state.save_digest_meta(meta)
+        logger.info(
+            "Дайджест отправлен: %d новостей, %d сообщени(е/я/й).",
+            len(digest_queue), len(digest_messages),
+        )
+
+
 def main() -> int:
     if not DRY_RUN and not check_config():
         return 1
@@ -69,37 +130,7 @@ def main() -> int:
         )
         return 0
 
-    is_night = timeutil.is_night_msk()
-    logger.info("Сейчас %s по МСК", "ночь (копим в очередь)" if is_night else "день (публикуем сразу)")
-
-    # Если сейчас день и с ночи осталась накопленная очередь — сначала
-    # отправляем её одним дайджестом, до обработки текущих новых заголовков
-    # этого запуска (чтобы порядок в канале был хронологический).
-    if not is_night:
-        night_queue = state.load_night_queue()
-        if night_queue:
-            intro_ru = llm.summarize_night(night_queue)
-            digest_messages = telegram_bot.build_digest_messages(night_queue, intro_ru)
-            if DRY_RUN:
-                for i, msg in enumerate(digest_messages, 1):
-                    logger.info("[DRY_RUN] Дайджест %d/%d:\n%s\n", i, len(digest_messages), msg)
-                state.save_night_queue([])
-                logger.info("[DRY_RUN] Дайджест из %d новостей 'отправлен'.", len(night_queue))
-            else:
-                sent_all = True
-                for msg in digest_messages:
-                    if not telegram_bot.send_message(msg):
-                        sent_all = False
-                        logger.warning(
-                            "Не удалось отправить часть дайджеста — очередь оставляем, "
-                            "попробуем снова следующим запуском."
-                        )
-                        break
-                    time.sleep(SEND_DELAY_SECONDS)
-                if sent_all:
-                    state.save_night_queue([])
-                    logger.info("Дайджест отправлен: %d новостей, %d сообщени(е/я/й).",
-                                len(night_queue), len(digest_messages))
+    maybe_flush_digest()
 
     new_items = state.filter_new_items(st, items)
     logger.info("Новых (ещё не опубликованных) заголовков: %d", len(new_items))
@@ -108,7 +139,10 @@ def main() -> int:
         logger.info("Публиковать нечего.")
         return 0
 
+    recent_posts = state.load_recent_posts()
+
     posted_count = 0
+    skipped_duplicates = 0
     translate_failures = 0
     for item in new_items:
         # пробуем прочитать саму статью (полный текст через trafilatura,
@@ -134,7 +168,7 @@ def main() -> int:
             preview,
         )
 
-        translated = llm.translate_and_comment(item)
+        translated = llm.translate_and_comment(item, recent_posts=recent_posts)
         if translated is None:
             logger.warning("Пропускаем (не удалось перевести): %s — %s", item["source"], item["title"])
             translate_failures += 1
@@ -149,40 +183,60 @@ def main() -> int:
             state.save_state(st)
             continue
 
-        if is_night:
-            # Ночью (23:00-08:00 МСК) не публикуем по одной сразу — копим в
-            # очередь, она уйдёт одним дайджестом первым дневным запуском.
-            # Сохраняем очередь ДО отметки "опубликовано" в основном state —
-            # если пайплайн упадёт между этими двумя шагами, лучше повторно
-            # обработать заголовок (дубль в очереди не страшнее дубля поста),
-            # чем молча потерять уже переведённую новость.
-            state.append_to_night_queue(
-                item["source"], translated["headline_ru"], translated["comment_ru"], item["link"]
-            )
+        story_status = translated.get("story_status", "new")
+        if story_status == "duplicate":
+            # та же история, что уже публиковали (с другого источника), и без
+            # ничего нового по сути — не публикуем, но помечаем обработанным
+            logger.info("Пропускаем (дубль уже опубликованной истории): %s — %s", item["source"], item["title"])
             state.mark_posted(st, [item])
             state.save_state(st)
-            posted_count += 1
-            logger.info("В ночную очередь: %s — %s", item["source"], item["title"])
+            skipped_duplicates += 1
             continue
 
-        text = telegram_bot.build_message(item, translated)
+        urgency = translated.get("urgency", "routine")
 
-        if DRY_RUN:
-            logger.info("[DRY_RUN] Пост из %s:\n%s\n", item["source"], text)
-            ok = True
-        else:
-            ok = telegram_bot.send_message(text)
+        if urgency == "breaking":
+            text = telegram_bot.build_message(item, translated)
 
-        if ok:
-            state.mark_posted(st, [item])
-            state.save_state(st)  # сохраняем сразу, чтобы при сбое не задвоить пост
-            posted_count += 1
-            if not DRY_RUN:
-                time.sleep(SEND_DELAY_SECONDS)
-        else:
-            logger.warning("Пропускаем (не удалось отправить в Telegram): %s — %s", item["source"], item["title"])
+            if DRY_RUN:
+                logger.info("[DRY_RUN] Пост из %s:\n%s\n", item["source"], text)
+                ok = True
+            else:
+                ok = telegram_bot.send_message(text)
 
-    logger.info("Готово. Опубликовано постов: %d из %d новых.", posted_count, len(new_items))
+            if ok:
+                state.mark_posted(st, [item])
+                state.save_state(st)  # сохраняем сразу, чтобы при сбое не задвоить пост
+                recent_posts = state.append_recent_post(
+                    recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"]
+                )
+                posted_count += 1
+                if not DRY_RUN:
+                    time.sleep(SEND_DELAY_SECONDS)
+            else:
+                logger.warning("Пропускаем (не удалось отправить в Telegram): %s — %s", item["source"], item["title"])
+            continue
+
+        # routine — не публикуем сразу, копим в очередь дайджеста. Порядок —
+        # сначала очередь и recent_posts, потом отметка "опубликовано" в
+        # основном state: если пайплайн упадёт между этими шагами, лучше
+        # повторно обработать заголовок (дубль в очереди не страшнее дубля
+        # поста), чем молча потерять уже переведённую новость.
+        state.append_to_digest_queue(
+            item["source"], translated["headline_ru"], translated["comment_ru"], item["link"]
+        )
+        recent_posts = state.append_recent_post(
+            recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"]
+        )
+        state.mark_posted(st, [item])
+        state.save_state(st)
+        posted_count += 1
+        logger.info("В очередь дайджеста: %s — %s", item["source"], item["title"])
+
+    logger.info(
+        "Готово. Обработано постов: %d из %d новых (пропущено дублей: %d).",
+        posted_count, len(new_items), skipped_duplicates,
+    )
 
     if translate_failures > 0 and translate_failures == len(new_items):
         # ни одна новость не перевелась — это не "модели не повезло на одном
