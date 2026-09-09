@@ -50,7 +50,26 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python main.py
 
+      - name: Закоммитить обновлённое состояние
+        # Раньше это был голый `git push` — если два запуска пересекались по
+        # времени (например, сразу после деплоя новой версии), проигравший
+        # получал "rejected (fetch first)" и падал, а Telegram-пост к этому
+        # моменту уже уходил (это делает main.py раньше) — просто его id не
+        # попадал в posted.json, и следующий запуск публиковал его ПОВТОРНО.
+        # Именно так возник дубль поста про Texas Stock Exchange в ночь на
+        # 10.09.2026. scripts/commit_state.py при неудачном push подтягивает
+        # свежий origin, сливает state-файлы по смыслу (объединяет id/записи,
+        # а не берёт чью-то версию целиком) и пробует снова, до 5 раз.
+        run: |
+          git config user.name "talkuyut-dengi-bot"
+          git config user.email "actions@users.noreply.github.com"
+          python scripts/commit_state.py main
+
       - name: Уведомить о сбое
+        # Стоит ПОСЛЕДНИМ шагом намеренно: если поставить его раньше шага
+        # коммита (как было раньше), падение именно коммита/push осталось бы
+        # без уведомления — job на GitHub помечался бы failed, а в личку
+        # ничего бы не прилетало (ровно это и произошло в ночь на 10.09.2026).
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -63,21 +82,3 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_ADMIN_CHAT_ID}" \
             -d text="⚠️ talkuyut-dengi: пайплайн упал с ошибкой. Лог: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-      - name: Закоммитить обновлённое состояние
-        run: |
-          git config user.name "talkuyut-dengi-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add state/posted.json
-          # Остальные файлы состояния создаются пайплайном по мере надобности
-          # (не с первого запуска) — если файла ещё нет, не валим шаг на этом
-          # (`if`, а не `&&`, потому что shell тут запускается с `set -e`, и
-          # голая `&&`-цепочка с проваленным условием слева тоже завершила бы
-          # скрипт)
-          for f in state/digest_queue.json state/digest_meta.json state/recent_posts.json; do
-            if [ -f "$f" ]; then
-              git add "$f"
-            fi
-          done
-          git diff --cached --quiet || git commit -m "chore: обновить state [skip ci]"
-          git push
