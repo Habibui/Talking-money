@@ -86,9 +86,10 @@ def maybe_flush_digest() -> None:
         logger.info("[DRY_RUN] Дайджест из %d новостей 'отправлен'.", len(digest_queue))
         return
 
+    silent = timeutil.is_night_msk()
     sent_all = True
     for msg in digest_messages:
-        if not telegram_bot.send_message(msg):
+        if not telegram_bot.send_message(msg, silent=silent):
             sent_all = False
             logger.warning(
                 "Не удалось отправить часть дайджеста — очередь и час флаша "
@@ -202,7 +203,7 @@ def main() -> int:
                 logger.info("[DRY_RUN] Пост из %s:\n%s\n", item["source"], text)
                 ok = True
             else:
-                ok = telegram_bot.send_message(text)
+                ok = telegram_bot.send_message(text, silent=timeutil.is_night_msk())
 
             if ok:
                 state.mark_posted(st, [item])

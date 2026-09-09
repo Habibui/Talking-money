@@ -79,13 +79,19 @@ def build_digest_messages(queue_items: list, intro_ru: str | None = None) -> lis
     return [header(i, total) + divider.join(part_blocks) for i, part_blocks in enumerate(parts, start=1)]
 
 
-def send_message(text: str) -> bool:
+def send_message(text: str, silent: bool = False) -> bool:
+    """silent=True шлёт сообщение без звука/вибрации у подписчиков
+    (Telegram disable_notification) — сам пост при этом появляется в канале
+    сразу же, ничего не задерживается. Используется ночью (23:00–08:00 МСК,
+    см. timeutil.is_night_msk), чтобы не будить подписчиков уведомлением,
+    но и не жертвовать своевременностью для тех, кто открывает канал сам."""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": config.TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
+        "disable_notification": silent,
     }
     try:
         resp = requests.post(url, json=payload, timeout=config.REQUEST_TIMEOUT)
