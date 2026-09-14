@@ -75,7 +75,11 @@ def fetch_article_lead(url: str) -> str:
     if extracted:
         text = _clean_text(extracted)
         if text:
-            return text[: config.MAX_ARTICLE_CHARS]
+            # Не обрезаем здесь по MAX_ARTICLE_CHARS — эту обрезку (и повтор
+            # с другой длиной при сбое парсинга JSON) делает
+            # llm.translate_and_comment() из уже полученного текста, без
+            # повторного похода в сеть. Здесь только sanity-предел.
+            return text[: config.ARTICLE_FETCH_HARD_CAP_CHARS]
 
     try:
         soup = BeautifulSoup(resp.text, "html.parser")

@@ -25,7 +25,7 @@ import os
 import sys
 import time
 
-from src import config, llm, sources, state, telegram_bot, timeutil
+from src import config, dedup, llm, sources, state, telegram_bot, timeutil
 
 logging.basicConfig(
     level=logging.INFO,
@@ -197,6 +197,34 @@ def main() -> int:
         urgency = translated.get("urgency", "routine")
 
         if urgency == "breaking":
+            # Модель уже сверяла эту новость со списком recent_posts и сама
+            # решила, что это не дубль (иначе story_status был бы "duplicate"
+            # и мы бы сюда не дошли, см. выше). Но именно на "breaking" цена
+            # ошибки модели выше, чем на рутине: "breaking" публикуется
+            # немедленно, отдельным постом, минуя очередь дайджеста — если
+            # модель дубль всё-таки прозевала, подписчики увидят два
+            # отдельных поста об одном и том же почти подряд. Поэтому здесь
+            # — независимая от LLM подстраховка на простом текстовом сходстве
+            # (см. src/dedup.py): она не блокирует публикацию (могло дать
+            # ложное срабатывание — например, две разные истории с похожими
+            # цифрами, см. комментарий в dedup.py), а лишь понижает "breaking"
+            # до "routine", если совпадение с чем-то из recent_posts всё же
+            # подозрительно велико. Тогда прозёванный дубль всё равно уйдёт в
+            # канал, но не отдельным немедленным постом, а строчкой в
+            # ближайшем дайджесте — заметно менее навязчиво.
+            is_near_dup, dup_score, dup_match = dedup.is_near_duplicate(
+                translated["headline_ru"], translated["comment_ru"], recent_posts
+            )
+            if is_near_dup:
+                logger.warning(
+                    "Понижаем breaking → routine (текстовое сходство %.2f с уже "
+                    "опубликованным [%s] %r): %s — %s",
+                    dup_score, dup_match["source"], dup_match["headline_ru"],
+                    item["source"], item["title"],
+                )
+                urgency = "routine"
+
+        if urgency == "breaking":  # проверяем заново — могло понизиться выше
             text = telegram_bot.build_message(item, translated)
 
             if DRY_RUN:
@@ -212,6 +240,15 @@ def main() -> int:
                     recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"]
                 )
                 posted_count += 1
+                # story_status пишем в лог явно (не только для "duplicate", как
+                # раньше) — иначе при подозрении на дубль между источниками
+                # (модель сочла его не дублем, а "new"/"update") нет способа
+                # проверить постфактум, что именно вернула модель и было ли у
+                # неё вообще на входе достаточно recent_posts для сравнения.
+                logger.info(
+                    "Опубликовано (breaking, story_status=%s, recent_posts=%d): %s — %s",
+                    story_status, len(recent_posts) - 1, item["source"], item["title"],
+                )
                 if not DRY_RUN:
                     time.sleep(SEND_DELAY_SECONDS)
             else:
@@ -232,7 +269,10 @@ def main() -> int:
         state.mark_posted(st, [item])
         state.save_state(st)
         posted_count += 1
-        logger.info("В очередь дайджеста: %s — %s", item["source"], item["title"])
+        logger.info(
+            "В очередь дайджеста (story_status=%s, recent_posts=%d): %s — %s",
+            story_status, len(recent_posts) - 1, item["source"], item["title"],
+        )
 
     logger.info(
         "Готово. Обработано постов: %d из %d новых (пропущено дублей: %d).",

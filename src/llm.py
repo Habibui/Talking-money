@@ -89,6 +89,16 @@ comment_ru тогда можно оставить короткими/пусты�
    нельзя каждый раз заново раскручивать одну и ту же логическую цепочку с \
    нуля, будто читатель видит её впервые. "new" — когда различается сама суть \
    события, а не просто его конкретное проявление или источник.
+   Отдельно: разные источники могут по-разному (и даже противоречиво) \
+   описывать один и тот же факт — например, один пишет "впервые с 2007 \
+   года", другой про то же самое значение показателя пишет "впервые с 2023 \
+   года". Это НЕ повод счесть их разными историями — наоборот, сам факт, что \
+   оба источника говорят об одном и том же показателе, преодолевшем один и \
+   тот же порог примерно в одно и то же время, надёжнее, чем то, с каким \
+   годом они его сравнивают (тут как раз возможна ошибка/неточность у \
+   кого-то из источников). Сверяй по сути (что именно произошло, с каким \
+   показателем/порогом, когда) — а не по тому, как именно источник это \
+   обрамил.
    Если списка недавних новостей не дали или он пуст — считай "story_status": \
    "new".
 
@@ -199,7 +209,14 @@ def summarize_digest(queue_items: list) -> str | None:
     if not queue_items:
         return None
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    # timeout=30 — без него SDK по умолчанию ждёт до 600 секунд на один
+    # запрос (плюс встроенные повторы), а это при 15-минутном интервале
+    # между запусками пайплайна означает, что один подвисший вызов может
+    # продержать job почти до следующего срабатывания cron — и тогда его
+    # оборвёт cancel-in-progress: true (см. .github/workflows/publish.yml),
+    # не дав шагу коммита state отработать вовремя. Обнаружено 13.09.2026 —
+    # именно так, судя по всему, возник дубль поста про Ормузский пролив.
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=30.0)
     headlines = "\n".join(f"- {it['headline_ru']}" for it in queue_items)
 
     try:
@@ -229,68 +246,120 @@ def translate_and_comment(item: dict, recent_posts: list | None = None) -> dict 
     валидный ответ, просто новость не подходит по теме и её не нужно
     публиковать)."""
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    # timeout=30 — см. комментарий в summarize_digest() выше: без явного
+    # таймаута один подвисший вызов Anthropic может держать job почти до
+    # следующего запуска и попасть под cancel-in-progress: true уже после
+    # успешной отправки другой новости в Telegram, но до коммита state.
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=30.0)
 
-    user_content = (
-        f"Источник: {item['source']}\n"
-        f"Заголовок (en): {item['title']}\n"
-        f"Краткое содержание (en): {item['summary']}\n"
-    )
-
+    recent_block = ""
     if recent_posts:
         recent_block = "\n".join(
             f"- [{p['source']}] {p['headline_ru']} — {p['comment_ru']}" for p in recent_posts
         )
-        user_content += (
-            f"\nНедавно опубликованные в канале новости (для проверки на "
-            f"дубли/апдейты):\n{recent_block}\n"
+
+    # Две попытки (item["summary"] — уже полученный текст, повторного похода
+    # в сеть здесь нет). Смысл повтора не в том, что не хватило текста, а в
+    # том, что модель могла один раз сбиться на кривом JSON/непереводе —
+    # частый случай, когда жёсткая обрезка по числу символов разрезает текст
+    # прямо посреди цитаты (незакрытая кавычка на входе). Поэтому 1-я попытка
+    # режет по MAX_ARTICLE_CHARS (не гонять на каждый обычный запрос лишние
+    # токены), а 2-я (только если 1-я сбилась именно на формате) берёт ВЕСЬ
+    # уже полученный текст без обрезки вообще — это не "другая длина среза",
+    # а гарантированное отсутствие среза как причины: у настоящего конца
+    # статьи (или её sanity-предела ARTICLE_FETCH_HARD_CAP_CHARS в sources.py)
+    # нет разумных причин обрываться посреди незакрытой кавычки, в отличие от
+    # произвольной точки на MAX_ARTICLE_CHARS. См. историю ошибки
+    # "Unterminated string" 13-14.09.2026.
+    char_limits = [config.MAX_ARTICLE_CHARS, None]  # None — без обрезки, весь текст
+
+    for attempt, char_limit in enumerate(char_limits, start=1):
+        is_last_attempt = attempt == len(char_limits)
+        article_text = item["summary"] if char_limit is None else item["summary"][:char_limit]
+
+        user_content = (
+            f"Источник: {item['source']}\n"
+            f"Заголовок (en): {item['title']}\n"
+            f"Краткое содержание (en): {article_text}\n"
         )
+        if recent_block:
+            user_content += (
+                f"\nНедавно опубликованные в канале новости (для проверки на "
+                f"дубли/апдейты):\n{recent_block}\n"
+            )
 
-    try:
-        response = client.messages.create(
-            model=config.LLM_MODEL,
-            max_tokens=500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        raw = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
-        ).strip()
+        try:
+            response = client.messages.create(
+                model=config.LLM_MODEL,
+                max_tokens=500,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            raw = "".join(
+                block.text for block in response.content if getattr(block, "type", "") == "text"
+            ).strip()
 
-        # модель иногда всё равно оборачивает ответ в ```json ... ``` — подчистим
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-            if raw.lower().startswith("json"):
-                raw = raw[4:]
+            # модель иногда всё равно оборачивает ответ в ```json ... ``` — подчистим
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+                if raw.lower().startswith("json"):
+                    raw = raw[4:]
 
-        # берём только первый валидный JSON-объект и игнорируем всё, что
-        # модель могла добавить после него (лишний текст/пояснение) —
-        # обычный json.loads падает на этом с "Extra data"
-        data, _ = json.JSONDecoder().raw_decode(raw)
-        if "headline_ru" not in data or "comment_ru" not in data:
-            raise ValueError(f"В ответе модели нет нужных ключей: {data}")
-        data.setdefault("relevant", True)  # старые/неполные ответы считаем релевантными
-        data.setdefault("story_status", "new")
-        data.setdefault("urgency", "routine")
+            # берём только первый валидный JSON-объект и игнорируем всё, что
+            # модель могла добавить после него (лишний текст/пояснение) —
+            # обычный json.loads падает на этом с "Extra data"
+            data, _ = json.JSONDecoder().raw_decode(raw)
+            if "headline_ru" not in data or "comment_ru" not in data:
+                raise ValueError(f"В ответе модели нет нужных ключей: {data}")
+            data.setdefault("relevant", True)  # старые/неполные ответы считаем релевантными
+            data.setdefault("story_status", "new")
+            data.setdefault("urgency", "routine")
 
-        # то, что реально уйдёт в канал (см. main.py), должно быть на русском —
-        # если релевантно и не дубль, а headline/comment по факту остались на
-        # английском (модель не перевела), не публикуем брак, а считаем это
-        # ошибкой перевода: main.py повторит попытку на следующем запуске
-        if data["relevant"] and data["story_status"] != "duplicate":
-            headline = data.get("headline_ru", "")
-            comment = data.get("comment_ru", "")
-            if not _is_mostly_cyrillic(headline) or not _is_mostly_cyrillic(comment):
-                raise ValueError(
-                    f"Модель вернула непереведённый текст для {item['source']}: "
-                    f"headline_ru={headline!r}, comment_ru={comment!r}"
+            # то, что реально уйдёт в канал (см. main.py), должно быть на русском —
+            # если релевантно и не дубль, а headline/comment по факту остались на
+            # английском (модель не перевела), не публикуем брак, а считаем это
+            # ошибкой перевода
+            if data["relevant"] and data["story_status"] != "duplicate":
+                headline = data.get("headline_ru", "")
+                comment = data.get("comment_ru", "")
+                if not _is_mostly_cyrillic(headline) or not _is_mostly_cyrillic(comment):
+                    raise ValueError(
+                        f"Модель вернула непереведённый текст для {item['source']}: "
+                        f"headline_ru={headline!r}, comment_ru={comment!r}"
+                    )
+
+            return data
+
+        except (json.JSONDecodeError, ValueError) as exc:
+            # именно эти два класса ошибок — про формат ответа модели самой
+            # по себе (не распарсился JSON / нет нужных ключей / не перевела),
+            # а не про сеть или сам API — поэтому имеет смысл повторить с
+            # другой обрезкой текста, а не сразу сдаваться
+            if not is_last_attempt:
+                limit_desc = f"{char_limit} симв." if char_limit is not None else "без обрезки"
+                next_desc = (
+                    f"{char_limits[attempt]} симв." if char_limits[attempt] is not None else "весь текст без обрезки"
                 )
+                logger.warning(
+                    "Сбой формата ответа модели для %s (%s) при обрезке (%s), "
+                    "повтор (%s): %s",
+                    item["source"], item["link"], limit_desc, next_desc, exc,
+                )
+                continue
+            logger.error(
+                "Ошибка перевода/комментария для %s (%s) после повтора: %s",
+                item["source"], item["link"], exc,
+            )
+            return None
 
-        return data
+        except Exception as exc:
+            # сетевые/API-ошибки (таймаут, 5xx и т.п.) — повтор с другой
+            # длиной текста тут не при чём, а свои повторы на этот случай уже
+            # делает сам anthropic SDK; сдаёмся сразу, как и раньше
+            logger.error(
+                "Ошибка перевода/комментария для %s (%s): %s", item["source"], item["link"], exc
+            )
+            return None
 
-    except Exception as exc:
-        logger.error(
-            "Ошибка перевода/комментария для %s (%s): %s", item["source"], item["link"], exc
-        )
-        return None
+    return None  # недостижимо (цикл всегда либо return, либо raise на последней попытке)
