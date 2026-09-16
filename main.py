@@ -144,6 +144,7 @@ def main() -> int:
 
     posted_count = 0
     skipped_duplicates = 0
+    skipped_near_duplicates = 0
     translate_failures = 0
     for item in new_items:
         # пробуем прочитать саму статью (полный текст через trafilatura,
@@ -194,37 +195,40 @@ def main() -> int:
             skipped_duplicates += 1
             continue
 
+        # Модель уже сверяла эту новость со списком recent_posts и сама решила,
+        # что это не дубль (иначе story_status был бы "duplicate" выше). Но
+        # 16.09.2026 обнаружилось, что модель систематически пропускает именно
+        # дубли между СВЕЖИМИ заметками об одном и том же событии — типично от
+        # одного источника-агрегатора с разницей в секунды-минуты (решение +
+        # реакция рынка + прогноз, всё про одно и то же) — и каждая уходила с
+        # story_status="new", раздувая дайджест копиями (см.
+        # claude/pipeline-v1-setup.md, инцидент 16.09.2026). Поэтому —
+        # независимая от LLM подстраховка на простом текстовом сходстве (см.
+        # src/dedup.py), применяется КО ВСЕМ новостям, а не только к
+        # "breaking", как было раньше (раньше здесь было только мягкое
+        # понижение breaking → routine — этого оказалось недостаточно, т.к.
+        # подавляющее большинство обнаруженных 16.09 дублей изначально шли
+        # как "routine", и та версия фильтра их вообще не проверяла). При
+        # срабатывании обрабатываем точно так же, как LLM-дубль выше — не
+        # публикуем и не копим в дайджест.
+        is_near_dup, dup_score, dup_match = dedup.is_near_duplicate(
+            translated["headline_ru"], translated["comment_ru"], recent_posts
+        )
+        if is_near_dup:
+            logger.warning(
+                "Пропускаем (текстовое сходство %.2f с уже опубликованным "
+                "[%s] %r, story_status от модели был %r): %s — %s",
+                dup_score, dup_match["source"], dup_match["headline_ru"],
+                story_status, item["source"], item["title"],
+            )
+            state.mark_posted(st, [item])
+            state.save_state(st)
+            skipped_near_duplicates += 1
+            continue
+
         urgency = translated.get("urgency", "routine")
 
         if urgency == "breaking":
-            # Модель уже сверяла эту новость со списком recent_posts и сама
-            # решила, что это не дубль (иначе story_status был бы "duplicate"
-            # и мы бы сюда не дошли, см. выше). Но именно на "breaking" цена
-            # ошибки модели выше, чем на рутине: "breaking" публикуется
-            # немедленно, отдельным постом, минуя очередь дайджеста — если
-            # модель дубль всё-таки прозевала, подписчики увидят два
-            # отдельных поста об одном и том же почти подряд. Поэтому здесь
-            # — независимая от LLM подстраховка на простом текстовом сходстве
-            # (см. src/dedup.py): она не блокирует публикацию (могло дать
-            # ложное срабатывание — например, две разные истории с похожими
-            # цифрами, см. комментарий в dedup.py), а лишь понижает "breaking"
-            # до "routine", если совпадение с чем-то из recent_posts всё же
-            # подозрительно велико. Тогда прозёванный дубль всё равно уйдёт в
-            # канал, но не отдельным немедленным постом, а строчкой в
-            # ближайшем дайджесте — заметно менее навязчиво.
-            is_near_dup, dup_score, dup_match = dedup.is_near_duplicate(
-                translated["headline_ru"], translated["comment_ru"], recent_posts
-            )
-            if is_near_dup:
-                logger.warning(
-                    "Понижаем breaking → routine (текстовое сходство %.2f с уже "
-                    "опубликованным [%s] %r): %s — %s",
-                    dup_score, dup_match["source"], dup_match["headline_ru"],
-                    item["source"], item["title"],
-                )
-                urgency = "routine"
-
-        if urgency == "breaking":  # проверяем заново — могло понизиться выше
             text = telegram_bot.build_message(item, translated)
 
             if DRY_RUN:
@@ -275,8 +279,9 @@ def main() -> int:
         )
 
     logger.info(
-        "Готово. Обработано постов: %d из %d новых (пропущено дублей: %d).",
-        posted_count, len(new_items), skipped_duplicates,
+        "Готово. Обработано постов: %d из %d новых (пропущено дублей по мнению "
+        "модели: %d, пропущено по текстовому сходству: %d).",
+        posted_count, len(new_items), skipped_duplicates, skipped_near_duplicates,
     )
 
     if translate_failures > 0 and translate_failures == len(new_items):
