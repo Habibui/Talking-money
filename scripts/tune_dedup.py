@@ -225,6 +225,50 @@ TRUE_NEGATIVES = [
     ),
 ]
 
+# --- Реальный класс ложных срабатываний с продакшена, 17.09.2026 ------------
+# Разбор today_runs.txt (см. claude/pipeline-v1-setup.md, инцидент 17.09.2026)
+# показал 28 срабатываний salient_overlap>=2 из 30 при Jaccard 0.08-0.25 —
+# то есть НЕ на реальном текстовом сходстве, а на паре общих "фоновых" слов/
+# чисел (США, ФРС, Трамп, порог нефти "$100"), которые канал вставляет почти
+# в каждый комментарий про макроэкономику США независимо от темы поста.
+# Пары ниже — не дословные логи (в логах модель не сохраняет headline_ru/
+# comment_ru пропущенной новости целиком), а реконструкция того же паттерна
+# по реальным примерам из лога (тарифы vs розничные продажи, ипотека vs
+# розничные продажи) — регрессия на конкретный МЕХАНИЗМ ложного срабатывания,
+# а не на дословный текст.
+FALSE_POSITIVE_PATTERN_16_09 = [
+    (
+        {
+            "source": "Investing.com",
+            "headline_ru": "США откладывают анонс новых тарифов до саммита Си-Трампа",
+            "comment_ru": "Вашингтон явно тянет время — тарифная карта разыгрывается "
+                          "как элемент переговоров, а не как самостоятельное решение. "
+                          "Рынок нефти выше $100 такие паузы только приветствует.",
+        },
+        {
+            "headline_ru": "Розничные продажи США резко подскочили в августе",
+            "comment_ru": "Американский потребитель всё ещё готов тратить, несмотря на "
+                          "нефть выше $100 и растущие ставки ФРС — но не от оптимизма, "
+                          "а потому что инфляция съедает доходы быстрее, чем они растут.",
+        },
+    ),
+    (
+        {
+            "source": "Investing.com",
+            "headline_ru": "Ставка по 30-летней ипотеке США обновила максимум с января 2025",
+            "comment_ru": "Жильё в США дорожает в кредит быстрее, чем растут зарплаты — "
+                          "классика при нефти выше $100 и ФРС, которая не спешит резать "
+                          "ставки.",
+        },
+        {
+            "headline_ru": "Розничные продажи США резко подскочили в августе",
+            "comment_ru": "Американский потребитель всё ещё готов тратить, несмотря на "
+                          "нефть выше $100 и растущие ставки ФРС — но не от оптимизма, "
+                          "а потому что инфляция съедает доходы быстрее, чем они растут.",
+        },
+    ),
+]
+
 
 def run():
     print("=== Должны сработать (одна и та же история, синтетика) ===")
@@ -261,12 +305,27 @@ def run():
             false_positives += 1
         print(f"[{status}] score={score:.2f}  {new_item['headline_ru'][:60]!r}")
 
+    print("\n=== НЕ должны сработать (паттерн ложных срабатываний 17.09.2026 на "
+          "общих словах США/ФРС/$100) ===")
+    fp_pattern = 0
+    for new_item, old_post in FALSE_POSITIVE_PATTERN_16_09:
+        triggered, score, match = dedup.is_near_duplicate(
+            new_item["headline_ru"], new_item["comment_ru"], [old_post]
+        )
+        status = "FALSE POSITIVE" if triggered else "ok  "
+        if triggered:
+            fp_pattern += 1
+        print(f"[{status}] score={score:.2f}  {new_item['headline_ru'][:60]!r}")
+
     total_fails = fails + real_fails
+    total_false_positives = false_positives + fp_pattern
     print(f"\nИтого: пропущено дублей (miss) = {total_fails}/"
           f"{len(TRUE_DUPLICATES) + len(REAL_PRODUCTION_DUPLICATES)} "
           f"(из них реальных с продакшена: {real_fails}/{len(REAL_PRODUCTION_DUPLICATES)}), "
-          f"ложных срабатываний = {false_positives}/{len(TRUE_NEGATIVES)}")
-    return total_fails, false_positives
+          f"ложных срабатываний = {total_false_positives}/"
+          f"{len(TRUE_NEGATIVES) + len(FALSE_POSITIVE_PATTERN_16_09)} "
+          f"(из них паттерн 17.09: {fp_pattern}/{len(FALSE_POSITIVE_PATTERN_16_09)})")
+    return total_fails, total_false_positives
 
 
 if __name__ == "__main__":
