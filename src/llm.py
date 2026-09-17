@@ -289,14 +289,38 @@ def translate_and_comment(item: dict, recent_posts: list | None = None) -> dict 
     # "Unterminated string" 13-14.09.2026.
     char_limits = [config.MAX_ARTICLE_CHARS, None]  # None — без обрезки, весь текст
 
+    # Investing.com (и изредка другие источники) нередко отдают боту 403 на
+    # саму статью, а RSS-лид у той же заметки при этом тоже пуст — в таком
+    # случае article_text ниже — буквально пустая строка, и без явной
+    # пометки промпт выглядит как "Краткое содержание (en): " с пустым
+    # хвостом. Формально это не ломает запрос (заголовок title всё равно
+    # передаётся отдельной строкой выше и никогда не пуст), но модель не
+    # видит разницы между "лид пуст" и "лид просто короткий" — а это разные
+    # ситуации: во втором случае можно уверенно опираться на текст, в первом
+    # единственный источник фактов — сам заголовок, и дофантазировать
+    # детали (даже правдоподобные) особенно легко. Явно называем эту
+    # ситуацию моделью, а не оставляем пустую строку без объяснения —
+    # остальные правила (не выдумывать цифры/детали) уже есть в
+    # SYSTEM_PROMPT, здесь только даём модели опознать сам случай.
+    summary_is_empty = not item["summary"].strip()
+
     for attempt, char_limit in enumerate(char_limits, start=1):
         is_last_attempt = attempt == len(char_limits)
         article_text = item["summary"] if char_limit is None else item["summary"][:char_limit]
 
+        if summary_is_empty:
+            content_field = (
+                "[источник не отдал текст статьи, а RSS-лид у этой заметки тоже "
+                "пуст — единственный источник фактов здесь заголовок выше; не "
+                "добавляй цифры, подробности или детали, которых в заголовке нет]"
+            )
+        else:
+            content_field = article_text
+
         user_content = (
             f"Источник: {item['source']}\n"
             f"Заголовок (en): {item['title']}\n"
-            f"Краткое содержание (en): {article_text}\n"
+            f"Краткое содержание (en): {content_field}\n"
         )
         if recent_block:
             user_content += (

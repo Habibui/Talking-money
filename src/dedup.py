@@ -185,6 +185,21 @@ JACCARD_HIGH = 0.55
 JACCARD_MED = 0.30
 SALIENT_MANY = 2
 
+# 17.09.2026, часть 2: даже после исключения фоновых слов (см.
+# _SALIENT_WORD_EXCLUDE выше) условие 3 иногда всё ещё срабатывает почти на
+# нулевом реальном сходстве текста — например, "ФРС"+число из шаблонной
+# фразы про нефть могут совпасть у двух в остальном не связанных новостей
+# (см. scripts/tune_dedup.py, FALSE_POSITIVE_PATTERN_16_09, пара про ипотеку
+# vs розничные продажи, Jaccard=0.18). Порог ниже — не подмена условия 3
+# (два значимых токена по-прежнему сильный сигнал сам по себе), а защита от
+# случая, когда общий смысл текстов вообще ни при чём: если совпадений по
+# значимым токенам достаточно, но общий Jaccard даже не дотягивает до этого
+# минимума, вероятнее совпадение фона, а не факта. Подобран так, чтобы не
+# терять ни одного реального дубля из scripts/tune_dedup.py (минимальный
+# Jaccard среди реальных срабатываний условия 3 в этом наборе — 0.25) и при
+# этом отсекать конкретный найденный ложный случай (0.18).
+SALIENT_ONLY_JACCARD_FLOOR = 0.20
+
 
 def is_near_duplicate(headline_ru: str, comment_ru: str, recent_posts: list) -> tuple[bool, float, dict | None]:
     """Сравнивает новый headline_ru+comment_ru с каждым recent_posts (список
@@ -210,7 +225,7 @@ def is_near_duplicate(headline_ru: str, comment_ru: str, recent_posts: list) -> 
         is_trigger = (
             jaccard >= JACCARD_HIGH
             or (jaccard >= JACCARD_MED and salient_overlap >= 1)
-            or salient_overlap >= SALIENT_MANY
+            or (salient_overlap >= SALIENT_MANY and jaccard >= SALIENT_ONLY_JACCARD_FLOOR)
         )
         if is_trigger and jaccard > best_trigger_jaccard:
             best_trigger_jaccard = jaccard
