@@ -2,14 +2,29 @@
 Разовый скрипт для проверки src/dedup.py на реалистичных примерах: пары
 "один и тот же сюжет, разные источники/формулировки" (должны сработать) и
 пары "разные сюжеты, но похожая шаблонная подача" (не должны сработать).
-Срабатывание теперь означает полный пропуск новости (не публикуется и не
-идёт в дайджест) — см. main.py, использует те же пороги, что и раньше.
+Срабатывание означает полный пропуск новости (не публикуется и не идёт в
+дайджест) — см. main.py.
 
 Часть примеров (см. REAL_PRODUCTION_* ниже) — не выдуманные, а взятые
-буквально из state/recent_posts.json канала за 16.09.2026 (инцидент с
-дублями внутри "routine", см. claude/pipeline-v1-setup.md) — это
-регрессионный тест: пороги нельзя менять так, чтобы эти конкретные реальные
-дубли снова перестали ловиться.
+буквально из state/recent_posts.json канала (16.09.2026 — дубли внутри
+"routine"; 18.09.2026 — тройной дубль про Банк Японии, см.
+claude/pipeline-v1-setup.md) — это регрессионный тест: пороги нельзя менять
+так, чтобы эти конкретные реальные дубли снова перестали ловиться.
+
+18.09.2026 — три исхода вместо двух. С этой даты src/dedup.py сам решает
+только "определённые" случаи (условия 1/2 — is_near_duplicate). Пограничные
+случаи (только условие 3 — find_ambiguous_match) формулой не решаются
+принципиально (доказано на реальных данных, см. pipeline-v1-setup.md) и
+отдаются на решение модели (llm.confirm_same_event, реальный сетевой вызов,
+main.py). Этот скрипт не может (и не должен) звать реальную модель — вместо
+этого он показывает, КАК ИМЕННО src/dedup.py классифицирует каждую пару:
+"TRIGGER" (поймано формулой без вопросов), "AMBIGUOUS" (формула сама не
+решает — дальнейший исход в проде зависит от точности confirm_same_event,
+это не баг кода, а вопрос качества модели, стоит смотреть в логах прод-
+запусков) или "MISS"/"ok" (формула считает, что пары вообще нет). Пары,
+где 18.09.2026 добавлена эскалация, ожидаемо попадают в AMBIGUOUS с обеих
+сторон (и реальные дубли, и известные ложные срабатывания) — это ожидаемо
+и задокументировано, не путать с регрессией.
 
 Запуск: python3 scripts/tune_dedup.py
 """
@@ -141,6 +156,76 @@ REAL_PRODUCTION_DUPLICATES = [
                           "энергокризис не вылечить.",
         },
     ),
+    # 18.09.2026 — реальный пропущенный дубль из продакшена (три источника,
+    # три разных угла подачи одного и того же решения Банка Японии; см.
+    # claude/pipeline-v1-setup.md, инцидент 18.09.2026). Именно на этой паре
+    # доказано, что SALIENT_ONLY_JACCARD_FLOOR (введён и отменён 17-18.09.2026)
+    # не может работать: Jaccard здесь ниже, чем у ложного срабатывания
+    # ипотека/розница выше (FALSE_POSITIVE_PATTERN_16_09), хотя это настоящий
+    # дубль, а то — нет.
+    (
+        {
+            "source": "NYT",
+            "headline_ru": "Банк Японии поднял ставки до максимума за 31 год под "
+                            "давлением Бессента",
+            "comment_ru": "Уникальная история: Бессент, казначей США, буквально давил "
+                          "на BoJ повысить ставки — и Банк Японии согласился, поднимая "
+                          "их впервые за три десятилетия прямо под это давление. Это не "
+                          "просто нежелательное вмешательство иностранной администрации "
+                          "во внутреннюю денежную политику другой страны, а откровенный "
+                          "сигнал отчаяния: американское казначейство готово рисковать "
+                          "экспортом своего главного союзника, лишь бы глобально "
+                          "загасить инфляцию, которая на самом деле привязана к нефти "
+                          "над $100, а не к денежной политике. Йена взлетит, японский "
+                          "экспорт задохнётся, но Вашингтон рассчитывает, что "
+                          "скоординированное ужесточение везде сразу всё-таки сломит "
+                          "спрос. Спойлер: не сломит.",
+        },
+        {
+            "headline_ru": "Банк Японии поднял ставки до максимума за 31 год на фоне "
+                            "растущих инфляционных рисков",
+            "comment_ru": "Банк Японии наконец вышел из нулевых ставок и поднял их "
+                          "впервые за три десятилетия — это сигнал, что даже Токио "
+                          "больше не может игнорировать инфляцию, раздуваемую нефтью "
+                          "над $100. Проблема классическая: во всём мире центробанки "
+                          "взвинчивают ставки вслепую, думая, что это спасет от "
+                          "инфляции, но настоящая проблема в энергокризисе и войне за "
+                          "логистику, а не в избытке денег — ставками этот клубок не "
+                          "развязать, только спрос добьёшь и экспортёров удушишь, как "
+                          "Японию с курсом йены.",
+        },
+    ),
+    (
+        {
+            "source": "WSJ",
+            "headline_ru": "Банк Японии поднял ставки до 1,25% — максимума за 31 год. "
+                            "Теперь японским инвесторам невыгодна доходность "
+                            "американских активов",
+            "comment_ru": "BoJ наконец вышел из нулевых ставок впервые за три "
+                          "десятилетия, и это кардинально меняет игру для японского "
+                          "капитала. Когда йена начнёт расти вслед за повышением "
+                          "ставок, американские акции и облигации перестанут выглядеть "
+                          "как магнит для Токио — инвесторы будут просто терять деньги "
+                          "на конвертации. На фоне того, что ФРС тоже жмёт педаль и "
+                          "облигации скачут выше 5%, американские активы неожиданно "
+                          "становятся менее привлекательными именно для того "
+                          "инвестора, который их месяц скупал, чтобы спастись от "
+                          "нулевых ставок дома.",
+        },
+        {
+            "headline_ru": "Банк Японии поднял ставки до максимума за 31 год на фоне "
+                            "растущих инфляционных рисков",
+            "comment_ru": "Банк Японии наконец вышел из нулевых ставок и поднял их "
+                          "впервые за три десятилетия — это сигнал, что даже Токио "
+                          "больше не может игнорировать инфляцию, раздуваемую нефтью "
+                          "над $100. Проблема классическая: во всём мире центробанки "
+                          "взвинчивают ставки вслепую, думая, что это спасет от "
+                          "инфляции, но настоящая проблема в энергокризисе и войне за "
+                          "логистику, а не в избытке денег — ставками этот клубок не "
+                          "развязать, только спрос добьёшь и экспортёров удушишь, как "
+                          "Японию с курсом йены.",
+        },
+    ),
 ]
 
 # --- Пары, которые НЕ должны быть пойманы (разные истории, похожий шаблон) --
@@ -270,61 +355,80 @@ FALSE_POSITIVE_PATTERN_16_09 = [
 ]
 
 
+def classify(new_item, old_post):
+    """Возвращает ('TRIGGER'|'AMBIGUOUS'|'MISS', score) — см. докстринг файла.
+    score — jaccard, для TRIGGER/AMBIGUOUS от того условия, которое сработало."""
+    triggered, score, _ = dedup.is_near_duplicate(
+        new_item["headline_ru"], new_item["comment_ru"], [old_post]
+    )
+    if triggered:
+        return "TRIGGER", score
+
+    ambiguous = dedup.find_ambiguous_match(
+        new_item["headline_ru"], new_item["comment_ru"], [old_post]
+    )
+    if ambiguous is not None:
+        amb_jaccard, _salient, _match = ambiguous
+        return "AMBIGUOUS", amb_jaccard
+
+    return "MISS", score
+
+
 def run():
     print("=== Должны сработать (одна и та же история, синтетика) ===")
     fails = 0
     for new_item, old_post in TRUE_DUPLICATES:
-        triggered, score, match = dedup.is_near_duplicate(
-            new_item["headline_ru"], new_item["comment_ru"], [old_post]
-        )
-        status = "OK " if triggered else "MISS"
-        if not triggered:
+        status, score = classify(new_item, old_post)
+        # TRIGGER — поймано формулой; AMBIGUOUS — поймает confirm_same_event
+        # в проде (при условии, что модель ответит верно) — оба варианта
+        # здесь считаются "не пропущено", MISS — реальный провал.
+        ok = status in ("TRIGGER", "AMBIGUOUS")
+        if not ok:
             fails += 1
-        print(f"[{status}] score={score:.2f}  {new_item['headline_ru'][:60]!r}")
+        print(f"[{status:<9}] score={score:.2f}  {new_item['headline_ru'][:55]!r}")
 
-    print("\n=== Должны сработать (реальные дубли с продакшена, 16.09.2026) ===")
+    print("\n=== Должны сработать (реальные дубли с продакшена) ===")
     real_fails = 0
     for new_item, old_post in REAL_PRODUCTION_DUPLICATES:
         old_post = {**old_post, "source": new_item["source"]}
-        triggered, score, match = dedup.is_near_duplicate(
-            new_item["headline_ru"], new_item["comment_ru"], [old_post]
-        )
-        status = "OK " if triggered else "MISS"
-        if not triggered:
+        status, score = classify(new_item, old_post)
+        ok = status in ("TRIGGER", "AMBIGUOUS")
+        if not ok:
             real_fails += 1
-        print(f"[{status}] score={score:.2f}  {new_item['headline_ru'][:60]!r}")
+        print(f"[{status:<9}] score={score:.2f}  {new_item['headline_ru'][:55]!r}")
 
     print("\n=== НЕ должны сработать (разные истории) ===")
     false_positives = 0
     for new_item, old_post in TRUE_NEGATIVES:
-        triggered, score, match = dedup.is_near_duplicate(
-            new_item["headline_ru"], new_item["comment_ru"], [old_post]
-        )
-        status = "FALSE POSITIVE" if triggered else "ok  "
-        if triggered:
+        status, score = classify(new_item, old_post)
+        # TRIGGER здесь — настоящий баг (формула сама, без модели, приняла
+        # решение "дубль" для разных историй). AMBIGUOUS — не баг сам по
+        # себе (решение отдано модели), но риск, что модель ответит "yes" по
+        # ошибке — стоит следить в логах прод, отдельно от TRIGGER.
+        if status == "TRIGGER":
             false_positives += 1
-        print(f"[{status}] score={score:.2f}  {new_item['headline_ru'][:60]!r}")
+        print(f"[{status:<9}] score={score:.2f}  {new_item['headline_ru'][:55]!r}")
 
     print("\n=== НЕ должны сработать (паттерн ложных срабатываний 17.09.2026 на "
           "общих словах США/ФРС/$100) ===")
     fp_pattern = 0
     for new_item, old_post in FALSE_POSITIVE_PATTERN_16_09:
-        triggered, score, match = dedup.is_near_duplicate(
-            new_item["headline_ru"], new_item["comment_ru"], [old_post]
-        )
-        status = "FALSE POSITIVE" if triggered else "ok  "
-        if triggered:
+        status, score = classify(new_item, old_post)
+        if status == "TRIGGER":
             fp_pattern += 1
-        print(f"[{status}] score={score:.2f}  {new_item['headline_ru'][:60]!r}")
+        print(f"[{status:<9}] score={score:.2f}  {new_item['headline_ru'][:55]!r}")
 
     total_fails = fails + real_fails
     total_false_positives = false_positives + fp_pattern
-    print(f"\nИтого: пропущено дублей (miss) = {total_fails}/"
-          f"{len(TRUE_DUPLICATES) + len(REAL_PRODUCTION_DUPLICATES)} "
+    print(f"\nИтого: пропущено дублей формулой БЕЗ шанса на исправление моделью "
+          f"(MISS) = {total_fails}/{len(TRUE_DUPLICATES) + len(REAL_PRODUCTION_DUPLICATES)} "
           f"(из них реальных с продакшена: {real_fails}/{len(REAL_PRODUCTION_DUPLICATES)}), "
-          f"ложных срабатываний = {total_false_positives}/"
+          f"ложных срабатываний БЕЗ участия модели (TRIGGER) = {total_false_positives}/"
           f"{len(TRUE_NEGATIVES) + len(FALSE_POSITIVE_PATTERN_16_09)} "
-          f"(из них паттерн 17.09: {fp_pattern}/{len(FALSE_POSITIVE_PATTERN_16_09)})")
+          f"(из них паттерн 17.09: {fp_pattern}/{len(FALSE_POSITIVE_PATTERN_16_09)}).\n"
+          f"AMBIGUOUS-пары в выводе выше — не баг, их исход в проде зависит от "
+          f"llm.confirm_same_event (см. логи прод-запусков: 'Пограничный случай "
+          f"дедупа...').")
     return total_fails, total_false_positives
 
 

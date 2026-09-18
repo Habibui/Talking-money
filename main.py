@@ -214,6 +214,39 @@ def main() -> int:
         is_near_dup, dup_score, dup_match = dedup.is_near_duplicate(
             translated["headline_ru"], translated["comment_ru"], recent_posts
         )
+
+        # 18.09.2026: "определённые" дубли (условия 1/2 в dedup.py) решаются
+        # формулой прямо выше. Но есть отдельный пограничный случай (условие
+        # 3 — 2+ общих значимых токена при слабом остальном сходстве текста),
+        # для которого доказано (см. claude/pipeline-v1-setup.md, инцидент
+        # 18.09.2026), что формула/порог принципиально не могут отличить
+        # настоящий дубль (например, три источника про один и тот же хайк
+        # ставки Банка Японии) от случайного совпадения фоновых слов
+        # (например, "ФРС"+"нефть $100" у двух не связанных новостей). Такие
+        # случаи не решаем формулой — отдаём на решение той же модели, что и
+        # переводит новости, но отдельным узким вопросом (см.
+        # llm.confirm_same_event) вместо ещё одного порога.
+        if not is_near_dup:
+            ambiguous = dedup.find_ambiguous_match(
+                translated["headline_ru"], translated["comment_ru"], recent_posts
+            )
+            if ambiguous is not None:
+                amb_jaccard, amb_salient, amb_match = ambiguous
+                new_text = f"{translated['headline_ru']} {translated['comment_ru']}"
+                old_text = f"{amb_match.get('headline_ru', '')} {amb_match.get('comment_ru', '')}"
+                same_event = llm.confirm_same_event(new_text, old_text)
+                logger.info(
+                    "Пограничный случай дедупа (jaccard=%.2f, значимых токенов=%d) "
+                    "с [%s] %r — точечная проверка модели вернула %r: %s — %s",
+                    amb_jaccard, amb_salient, amb_match["source"], amb_match["headline_ru"],
+                    same_event, item["source"], item["title"],
+                )
+                if same_event:
+                    is_near_dup, dup_score, dup_match = True, amb_jaccard, amb_match
+                # same_event is False или None (сбой проверки) — публикуем как
+                # обычно; см. docstring confirm_same_event, почему сбой не
+                # должен блокировать публикацию.
+
         if is_near_dup:
             logger.warning(
                 "Пропускаем (текстовое сходство %.2f с уже опубликованным "
