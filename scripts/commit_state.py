@@ -29,7 +29,10 @@ STATE_FILES = [
     "state/digest_queue.json",
     "state/digest_meta.json",
     "state/recent_posts.json",
+    "state/dedup_escalations.json",
 ]
+
+DEDUP_ESCALATIONS_MAX_COUNT = 500  # держать в синхроне с config.DEDUP_ESCALATIONS_MAX_COUNT
 
 MAX_STATE_IDS = 3000
 MAX_ATTEMPTS = 5
@@ -127,6 +130,12 @@ def merge_state_with_origin(branch):
         "state/digest_meta.json": merge_digest_meta(
             mine["state/digest_meta.json"], theirs["state/digest_meta.json"]
         ),
+        "state/dedup_escalations.json": merge_list_by_key(
+            mine["state/dedup_escalations.json"],
+            theirs["state/dedup_escalations.json"],
+            key_fn=lambda it: (it.get("new_source"), it.get("new_headline_ru"), it.get("timestamp")),
+            sort_key=lambda it: it.get("timestamp", ""),
+        )[-DEDUP_ESCALATIONS_MAX_COUNT:],
     }
 
     for path, data in merged.items():

@@ -155,3 +155,56 @@ def append_recent_post(posts: list, source: str, headline_ru: str, comment_ru: s
     }]
     save_recent_posts(posts)
     return posts
+
+
+# --- Журнал пограничных случаев дедупа (19.09.2026) ---------------------------
+# См. config.DEDUP_ESCALATIONS_PATH. Копится каждый вызов llm.confirm_same_event
+# из main.py — не влияет на публикацию, только для последующего ручного
+# разбора точности этой проверки (scripts/review_escalations.py).
+
+
+def load_dedup_escalations() -> list:
+    if not os.path.exists(config.DEDUP_ESCALATIONS_PATH):
+        return []
+    with open(config.DEDUP_ESCALATIONS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_dedup_escalations(entries: list) -> None:
+    entries = entries[-config.DEDUP_ESCALATIONS_MAX_COUNT:]
+    os.makedirs(os.path.dirname(config.DEDUP_ESCALATIONS_PATH), exist_ok=True)
+    with open(config.DEDUP_ESCALATIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def append_dedup_escalation(
+    jaccard: float,
+    salient_overlap: int,
+    same_event: bool | None,
+    new_source: str,
+    new_headline_ru: str,
+    new_comment_ru: str,
+    old_source: str,
+    old_headline_ru: str,
+    old_comment_ru: str,
+) -> None:
+    """Не возвращает список и не держит его в памяти между новостями одного
+    прогона (в отличие от append_recent_post) — пограничные случаи редки, и
+    внутри одного запуска почти никогда не бывает больше одного-двух, так что
+    накладные расходы на перечитывание файла перед каждой записью не важны, а
+    код проще."""
+    entries = load_dedup_escalations()
+    entries.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "jaccard": round(jaccard, 3),
+        "salient_overlap": salient_overlap,
+        "same_event": same_event,
+        "new_source": new_source,
+        "new_headline_ru": new_headline_ru,
+        "new_comment_ru": new_comment_ru,
+        "old_source": old_source,
+        "old_headline_ru": old_headline_ru,
+        "old_comment_ru": old_comment_ru,
+    })
+    save_dedup_escalations(entries)

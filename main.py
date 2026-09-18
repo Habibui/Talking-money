@@ -241,6 +241,25 @@ def main() -> int:
                     amb_jaccard, amb_salient, amb_match["source"], amb_match["headline_ru"],
                     same_event, item["source"], item["title"],
                 )
+                # 19.09.2026: тот же случай — отдельной записью в постоянный
+                # журнал (state/dedup_escalations.json), а не только в лог
+                # запуска — логи GitHub Actions хранятся ограниченное время и
+                # искать по многим запускам вручную неудобно; журнал
+                # переживает запуски и разбирается одним скриптом (см.
+                # scripts/review_escalations.py). Не влияет на публикацию —
+                # чисто накопление данных для будущей оценки точности
+                # confirm_same_event на практике.
+                state.append_dedup_escalation(
+                    jaccard=amb_jaccard,
+                    salient_overlap=amb_salient,
+                    same_event=same_event,
+                    new_source=item["source"],
+                    new_headline_ru=translated["headline_ru"],
+                    new_comment_ru=translated["comment_ru"],
+                    old_source=amb_match["source"],
+                    old_headline_ru=amb_match["headline_ru"],
+                    old_comment_ru=amb_match.get("comment_ru", ""),
+                )
                 if same_event:
                     is_near_dup, dup_score, dup_match = True, amb_jaccard, amb_match
                 # same_event is False или None (сбой проверки) — публикуем как

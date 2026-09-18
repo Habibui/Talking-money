@@ -96,6 +96,17 @@ DIGEST_META_PATH = os.path.join(os.path.dirname(__file__), "..", "state", "diges
 RECENT_POSTS_PATH = os.path.join(os.path.dirname(__file__), "..", "state", "recent_posts.json")
 RECENT_POSTS_MAX_AGE_HOURS = 48  # старше — из окна сравнения на дубли/апдейты выпадает
 RECENT_POSTS_MAX_COUNT = 60      # и по числу тоже ограничиваем, чтобы промпт не разрастался
+
+# 19.09.2026: журнал пограничных случаев дедупа (main.py, вызовы
+# llm.confirm_same_event) — чтобы оценить реальную точность этой проверки на
+# практике, не нужно каждый раз лазить в логи конкретных запусков GitHub
+# Actions (у них ограниченный срок хранения, и искать по многим запускам
+# вручную неудобно). Каждый вызов confirm_same_event дописывает сюда одну
+# запись; смотреть — scripts/review_escalations.py. Это НЕ технический дедуп
+# сам по себе (на публикацию не влияет), чисто журнал для последующего
+# ручного разбора.
+DEDUP_ESCALATIONS_PATH = os.path.join(os.path.dirname(__file__), "..", "state", "dedup_escalations.json")
+DEDUP_ESCALATIONS_MAX_COUNT = 500  # старые записи обрезаем — файл только для выборочного ручного разбора
 MAX_STATE_IDS = 3000  # сколько последних id хранить в state, чтобы файл не рос бесконечно
 MAX_ITEMS_PER_SOURCE_PER_RUN = 10  # защита от аномального всплеска (сломанный фид и т.п.)
 REQUEST_TIMEOUT = 20  # секунд, для http-запросов
