@@ -278,6 +278,37 @@ def main() -> int:
             skipped_near_duplicates += 1
             continue
 
+        # 23.09.2026: страховка после перевода — усиление SYSTEM_PROMPT
+        # (коммит 6746f7d, 22.09.2026) само по себе не удержало модель от
+        # того, чтобы иногда оставлять известные сокращения как есть (BofA,
+        # OECD и т.п.), причём проблема повторилась уже на следующий день
+        # после деплоя фикса, не из старой очереди (см.
+        # claude/pipeline-v1-setup.md, инцидент 22-23.09.2026). Проверяем
+        # ТОЛЬКО тексты, которые реально дойдут до публикации (после проверок
+        # на дубли выше) — основной объём текстов вообще не содержит
+        # известных сокращений и лишнего вызова не получает.
+        found_abbrevs = llm.find_known_abbreviations(
+            translated["headline_ru"], translated["comment_ru"]
+        )
+        if found_abbrevs:
+            fixed = llm.fix_abbreviations(
+                translated["headline_ru"], translated["comment_ru"], found_abbrevs
+            )
+            if fixed:
+                translated["headline_ru"], translated["comment_ru"] = fixed
+                logger.info(
+                    "Заменены сокращения (%s): %s — %s",
+                    ", ".join(found_abbrevs), item["source"], item["title"],
+                )
+            else:
+                # сбой точечной правки — публикуем оригинал с сокращением как
+                # есть, не блокируем публикацию из-за необязательного шага
+                logger.warning(
+                    "Не удалось точечно поправить сокращения (%s), публикуем "
+                    "как есть: %s — %s",
+                    ", ".join(found_abbrevs), item["source"], item["title"],
+                )
+
         urgency = translated.get("urgency", "routine")
 
         if urgency == "breaking":
