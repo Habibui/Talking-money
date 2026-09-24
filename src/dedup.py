@@ -142,7 +142,16 @@ def _tokenize(text: str) -> tuple[set, set]:
         )
         if not has_digit and not is_capitalized and low in _STOPWORDS:
             continue
-        if len(low) < 2:
+        # 23.09.2026: раньше этот фильтр применялся ко ВСЕМ токенам, включая
+        # однозначные числа — из-за этого "5" (из "5%") молча выбрасывался из
+        # обоих текстов, хотя именно это число было общим ядровым фактом двух
+        # постов про доходность гособлигаций >5% (CNBC/Investing.com,
+        # инцидент 23.09.2026, см. claude/pipeline-v1-setup.md). Однобуквенные
+        # НЕ-цифровые токены (случайные обрывки типа "а", "к" не пойманные
+        # _STOPWORDS) по-прежнему отсекаются — цифры такому риску не
+        # подвержены (single-digit число почти всегда значимо в финансовой
+        # новости — ставка, процент, порядковое место и т.п.).
+        if not has_digit and len(low) < 2:
             continue
         key = _stem_key(low, has_digit)
         content.add(key)
@@ -263,21 +272,38 @@ def is_near_duplicate(headline_ru: str, comment_ru: str, recent_posts: list) -> 
     return False, best_jaccard, best_match
 
 
-def find_ambiguous_match(headline_ru: str, comment_ru: str, recent_posts: list) -> tuple[float, int, dict] | None:
-    """Ищет кандидата, у которого сработало ТОЛЬКО условие 3 (2+ общих
+# 23.09.2026: сколько пограничных кандидатов максимум отдавать на проверку
+# модели за один прогон для ОДНОЙ новой новости. Раньше find_ambiguous_match
+# отдавала только одного (с максимальным jaccard) кандидата — инцидент
+# 23.09.2026 (доходность гособлигаций >5%, CNBC/Investing.com) показал, что
+# при нескольких пограничных кандидатах в одном окне recent_posts настоящий
+# дубль может быть НЕ тем, у кого jaccard выше: две пары дошли до эскалации
+# (обе — против стороннего поста про 5-летние облигации, он просто набрал
+# чуть больше по формуле), а пара, которая и была настоящим дублём, вообще
+# не попала на проверку модели. Ограничение в 3 — подстраховка от раздувания
+# числа вызовов confirm_same_event в редком случае, когда кандидатов много
+# (на практике почти всегда 1, изредка 2 — см. state/dedup_escalations.json).
+AMBIGUOUS_MAX_CANDIDATES = 3
+
+
+def find_ambiguous_match(headline_ru: str, comment_ru: str, recent_posts: list) -> list[tuple[float, int, dict]]:
+    """Ищет кандидатов, у которых сработало ТОЛЬКО условие 3 (2+ общих
     значимых токена), но не более сильные условия 1/2 из is_near_duplicate()
     — то есть саму формулу нельзя использовать, чтобы решить, дубль это или
-    нет (см. историю выше). Вызывающий код (main.py) должен отдать такую пару
-    на решение модели (llm.confirm_same_event), а не считать её автоматически
-    дублём или не-дублём.
+    нет (см. историю выше). Вызывающий код (main.py) должен отдать такие пары
+    на решение модели (llm.confirm_same_event) по очереди, а не считать их
+    автоматически дублём или не-дублём.
 
-    Возвращает (jaccard, salient_overlap, пост-кандидат с лучшим jaccard среди
-    подозрительных) или None, если подозрительных пар нет."""
+    Возвращает список (jaccard, salient_overlap, пост-кандидат) для ВСЕХ
+    подозрительных пар — не только с максимальным jaccard (см. комментарий
+    к AMBIGUOUS_MAX_CANDIDATES выше про то, почему "только лучшего"
+    недостаточно) — отсортированный по jaccard по убыванию и обрезанный до
+    AMBIGUOUS_MAX_CANDIDATES. Пустой список, если подозрительных пар нет."""
     if not recent_posts:
-        return None
+        return []
 
     new_text = f"{headline_ru} {comment_ru}"
-    best: tuple[float, int, dict] | None = None
+    candidates: list[tuple[float, int, dict]] = []
 
     for post in recent_posts:
         old_text = f"{post.get('headline_ru', '')} {post.get('comment_ru', '')}"
@@ -287,7 +313,8 @@ def find_ambiguous_match(headline_ru: str, comment_ru: str, recent_posts: list) 
         if is_definite:
             continue  # уже её поймает (или не поймает) is_near_duplicate()
 
-        if salient_overlap >= SALIENT_MANY and (best is None or jaccard > best[0]):
-            best = (jaccard, salient_overlap, post)
+        if salient_overlap >= SALIENT_MANY:
+            candidates.append((jaccard, salient_overlap, post))
 
-    return best
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    return candidates[:AMBIGUOUS_MAX_CANDIDATES]

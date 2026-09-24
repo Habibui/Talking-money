@@ -227,12 +227,20 @@ def main() -> int:
         # переводит новости, но отдельным узким вопросом (см.
         # llm.confirm_same_event) вместо ещё одного порога.
         if not is_near_dup:
-            ambiguous = dedup.find_ambiguous_match(
+            ambiguous_candidates = dedup.find_ambiguous_match(
                 translated["headline_ru"], translated["comment_ru"], recent_posts
             )
-            if ambiguous is not None:
-                amb_jaccard, amb_salient, amb_match = ambiguous
-                new_text = f"{translated['headline_ru']} {translated['comment_ru']}"
+            # 23.09.2026: кандидатов может быть НЕСКОЛЬКО в одном окне
+            # recent_posts — инцидент с доходностью гособлигаций >5%
+            # (CNBC/Investing.com) показал, что старая версия
+            # find_ambiguous_match отдавала только ОДНОГО кандидата с
+            # максимальным jaccard, и настоящий дубль иногда оказывается не
+            # им (см. claude/pipeline-v1-setup.md). Проверяем по очереди, по
+            # убыванию jaccard, и останавливаемся на первом same_event=True —
+            # на практике кандидат почти всегда один, так что лишних вызовов
+            # модели это почти никогда не добавляет.
+            new_text = f"{translated['headline_ru']} {translated['comment_ru']}"
+            for amb_jaccard, amb_salient, amb_match in ambiguous_candidates:
                 old_text = f"{amb_match.get('headline_ru', '')} {amb_match.get('comment_ru', '')}"
                 same_event = llm.confirm_same_event(new_text, old_text)
                 logger.info(
@@ -262,9 +270,11 @@ def main() -> int:
                 )
                 if same_event:
                     is_near_dup, dup_score, dup_match = True, amb_jaccard, amb_match
-                # same_event is False или None (сбой проверки) — публикуем как
-                # обычно; см. docstring confirm_same_event, почему сбой не
-                # должен блокировать публикацию.
+                    break
+                # same_event is False или None (сбой проверки) — переходим к
+                # следующему кандидату (если есть); см. docstring
+                # confirm_same_event, почему сбой одной проверки не должен
+                # блокировать публикацию.
 
         if is_near_dup:
             logger.warning(
