@@ -89,7 +89,11 @@ def maybe_flush_digest() -> None:
     silent = timeutil.is_night_msk()
     sent_all = True
     for msg in digest_messages:
-        if not telegram_bot.send_message(msg, silent=silent):
+        # disable_preview=True — 24.09.2026, см. docstring send_message: в
+        # дайджесте несколько ссылок в одном сообщении, Telegram-превью
+        # рендерится только для первой из них и вводит в заблуждение (будто
+        # весь дайджест про одну новость).
+        if not telegram_bot.send_message(msg, silent=silent, disable_preview=True):
             sent_all = False
             logger.warning(
                 "Не удалось отправить часть дайджеста — очередь и час флаша "

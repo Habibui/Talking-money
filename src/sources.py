@@ -122,6 +122,10 @@ def fetch_rss(source: dict) -> list:
                 "title": title,
                 "summary": summary,
                 "link": link,
+                # 24.09.2026 — см. config.py: "ru" для источников, уже
+                # написанных по-русски (ЦБ РФ, Ведомости), чтобы
+                # llm.translate_and_comment() не пыталась их "переводить".
+                "language": source.get("language", "en"),
             }
         )
     return items
@@ -178,6 +182,7 @@ def fetch_telegram_channel(source: dict) -> list:
                 "title": title,
                 "summary": summary,
                 "link": link,
+                "language": source.get("language", "en"),
             }
         )
     return items

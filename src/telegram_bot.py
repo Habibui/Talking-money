@@ -79,18 +79,29 @@ def build_digest_messages(queue_items: list, intro_ru: str | None = None) -> lis
     return [header(i, total) + divider.join(part_blocks) for i, part_blocks in enumerate(parts, start=1)]
 
 
-def send_message(text: str, silent: bool = False) -> bool:
+def send_message(text: str, silent: bool = False, disable_preview: bool = False) -> bool:
     """silent=True шлёт сообщение без звука/вибрации у подписчиков
     (Telegram disable_notification) — сам пост при этом появляется в канале
     сразу же, ничего не задерживается. Используется ночью (23:00–08:00 МСК,
     см. timeutil.is_night_msk), чтобы не будить подписчиков уведомлением,
-    но и не жертвовать своевременностью для тех, кто открывает канал сам."""
+    но и не жертвовать своевременностью для тех, кто открывает канал сам.
+
+    disable_preview=True отключает предпросмотр ссылки под сообщением
+    (Telegram disable_web_page_preview). Обычные одиночные посты (одна
+    ссылка — источник в конце) по-прежнему показывают превью как раньше.
+    Дайджест (main.py, 24.09.2026) — исключение: там в ОДНОМ сообщении
+    сразу несколько разных ссылок (по одной на каждую новость), а Telegram
+    рендерит превью только для первой найденной ссылки в тексте — то есть
+    подписчик видит превью только последней добавленной в дайджест новости,
+    как будто весь пост про неё одну, а остальные новости в дайджесте
+    выглядят "без картинки". Для одиночного поста, где ссылка ровно одна,
+    этой проблемы нет."""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": config.TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False,
+        "disable_web_page_preview": disable_preview,
         "disable_notification": silent,
     }
     try:
