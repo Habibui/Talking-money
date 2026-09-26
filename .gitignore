@@ -10,3 +10,5 @@ venv/
 # артефакты одного прогона, не часть архива/истории пайплайна (в отличие
 # от archive/cards/ и archive/issues.jsonl) — не коммитим.
 ab_test_output/
+
+*.patch
