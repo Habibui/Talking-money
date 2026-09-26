@@ -119,7 +119,16 @@ def render_issue_html(issue: dict) -> str:
     parts = [f"<b>{issue['hook']}</b>", ""]
 
     for block in issue.get("blocks", []):
-        parts.append(f"<b>{block['title']}</b>")
+        # 26.09.2026 — НЕ оборачиваем в <b> здесь: промпт Аналитика
+        # (analyst.py, SYSTEM_PROMPT, правило 13) уже прямо требует, чтобы
+        # модель сама оборачивала заголовок блока в <b>...</b> — первый
+        # реальный полный прогон показал результат такого дублирования:
+        # <b><b>...</b></b> в готовом выпуске (syntactически валидно для
+        # Telegram, но лишняя вложенность — не то, что задумано). hook и
+        # watch_next модель НЕ оборачивает сама (в промпте это не
+        # требуется только для title), поэтому их оборачивание здесь ниже
+        # остаётся как было — не трогаем то, что не сломано.
+        parts.append(block["title"])
         parts.append(block["what"])
         if block.get("meaning"):
             parts.append(block["meaning"])
