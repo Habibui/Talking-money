@@ -1,0 +1,114 @@
+"""
+Общая обвязка для всех четырёх ролей v2 (Экстрактор/Отборщик/Аналитик/
+Фактчекер): разбор JSON-ответа + повтор при сбое формата. Раньше этот код
+был скопирован в каждый из четырёх файлов (`extractor.py`/`selector.py`/
+`analyst.py`/`factchecker.py`) по отдельности — вынесено сюда 26.09.2026 по
+факту первого реального DRY_RUN на живых данных, который сразу нашёл
+конкретный баг во всех четырёх копиях сразу: `max_tokens` был подобран "на
+глаз", без реального прогона, и оказался мал для части ответов — 9 из 90
+заметок в первом же прогоне сломались с `Unterminated string`/`Expecting
+value` (классический признак того, что ответ модели ОБРЫВАЕТСЯ по лимиту
+`max_tokens` до того, как JSON успевает закрыться, а не что модель
+сгенерировала кривой JSON по своей воле). Все 9 сломанных заметок — с
+русскоязычных источников (ЦБ РФ, Ведомости): вероятная причина — кириллица
+у большинства токенизаторов "весит" больше на символ, чем латиница, то есть
+то же по сути содержание `key_facts` на русском требует больше токенов, чем
+на английском, а старый лимит был один для всех языков. У Отборщика (37
+заметок разом, вход и так большой) отдельный сбой той же природы —
+`Expecting value: line 1 column 1 (char 0)` — это ответ, обрубленный
+настолько рано, что текстового блока в ответе не набралось вообще (весь
+токен-бюджет ушёл до появления итогового текста).
+
+**Решение — не бесконечно урезать вход (как для содержательных сбоев в
+`llm.py` v1), а дать модели больше места на ВЫХОД при повторе**: это другая
+по природе проблема, чем в v1 (там текст статьи мог обрываться посреди
+цитаты на входе — здесь наоборот, ответ модели обрывается по лимиту на
+выходе). `call_json_role()` принимает список `max_tokens_attempts` по
+возрастанию — при сбое формата (`JSONDecodeError`/`ValueError`) повторяет
+ТОТ ЖЕ запрос с бОльшим `max_tokens`, логируя `stop_reason` ответа для
+диагностики (`"max_tokens"` в `stop_reason` — прямое подтверждение именно
+этой причины, а не кривого JSON по другой причине). Стоимость это не
+увеличивает для нормально отрабатывающих ответов — `max_tokens` это
+потолок, а не то, что реально оплачивается; больше платится только за
+реально сгенерированные токены, а повтор случается только при сбое.
+"""
+
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def strip_json_fences(raw: str) -> str:
+    """Модель иногда оборачивает JSON в ```json ... ``` — снимаем разметку,
+    если она есть; если её нет, строка возвращается как есть."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+    return raw.strip()
+
+
+def call_json_role(
+    client,
+    model: str,
+    system_prompt: str,
+    user_content: str,
+    max_tokens_attempts: list[int],
+    role_name: str,
+    log_ctx: str = "",
+) -> dict | None:
+    """Вызывает модель с указанным промптом, разбирает JSON-ответ (терпимо —
+    через `raw_decode`, игнорируя текст после первого валидного объекта).
+    При сбое формата (обрыв по `max_tokens` или иначе кривой JSON) повторяет
+    с бОльшим `max_tokens` из списка `max_tokens_attempts` (по возрастанию).
+    Возвращает распарсенный dict, либо `None` при неустранимом сбое (после
+    всех попыток формата, или при сетевой/API-ошибке — там повтор смысла не
+    имеет, это забота самого SDK).
+
+    Не проверяет обязательные ключи схемы — это ответственность вызывающего
+    кода конкретной роли (у каждой роли свой набор обязательных ключей)."""
+    for attempt, max_tokens in enumerate(max_tokens_attempts, start=1):
+        is_last = attempt == len(max_tokens_attempts)
+        response = None
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            raw = "".join(
+                block.text for block in response.content if getattr(block, "type", "") == "text"
+            )
+            raw = strip_json_fences(raw)
+            data, _ = json.JSONDecoder().raw_decode(raw)
+            return data
+
+        except (json.JSONDecodeError, ValueError) as exc:
+            stop_reason = getattr(response, "stop_reason", "?") if response is not None else "?"
+            ctx = f" ({log_ctx})" if log_ctx else ""
+            if not is_last:
+                next_max = max_tokens_attempts[attempt]
+                logger.warning(
+                    "%s%s: сбой формата ответа при max_tokens=%s (stop_reason=%s) — "
+                    "похоже на обрыв по лимиту токенов, повтор с max_tokens=%s: %s",
+                    role_name, ctx, max_tokens, stop_reason, next_max, exc,
+                )
+                continue
+            logger.error(
+                "%s%s: сбой формата ответа после повтора (max_tokens=%s, stop_reason=%s): %s",
+                role_name, ctx, max_tokens, stop_reason, exc,
+            )
+            return None
+
+        except Exception as exc:
+            # сетевые/API-ошибки — повтор с другим max_tokens тут ни при чём,
+            # свои повторы уже делает сам anthropic SDK, сдаёмся сразу
+            ctx = f" ({log_ctx})" if log_ctx else ""
+            logger.error("%s%s: ошибка вызова: %s", role_name, ctx, exc)
+            return None
+
+    return None

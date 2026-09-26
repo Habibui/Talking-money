@@ -8,13 +8,12 @@ Project. Конвенции вызова (клиент/парсинг JSON/об�
 JSON-парсинг через raw_decode, отдельные классы ошибок формата vs сети.
 """
 
-import json
 import logging
-from datetime import datetime, timezone
 
 import anthropic
 
 from . import config
+from .llm_json import call_json_role
 
 logger = logging.getLogger(__name__)
 
@@ -146,51 +145,39 @@ def extract_note(item: dict) -> dict | None:
         f"Текст: {body_field}\n"
     )
 
-    try:
-        response = client.messages.create(
-            model=config.MODEL_EXTRACTOR,
-            max_tokens=600,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        raw = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
-        ).strip()
+    # 26.09.2026 — первый реальный DRY_RUN на живых данных: 9 из 90 заметок
+    # (все — с русскоязычных источников, ЦБ РФ/Ведомости) сломались с
+    # "Unterminated string"/"Expecting value" при max_tokens=600 — ответ
+    # обрывался по лимиту токенов до конца JSON, не был содержательно
+    # кривым. См. src/llm_json.py, docstring модуля, про вероятную причину
+    # (кириллица "весит" больше токенов на символ) и почему лечится большим
+    # max_tokens на повторе, а не укорачиванием входа.
+    data = call_json_role(
+        client, config.MODEL_EXTRACTOR, SYSTEM_PROMPT, user_content,
+        max_tokens_attempts=[700, 1400],
+        role_name="Экстрактор", log_ctx=f"{item['source']} {item['link']}",
+    )
+    if data is None:
+        return None
 
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-            if raw.lower().startswith("json"):
-                raw = raw[4:]
-
-        data, _ = json.JSONDecoder().raw_decode(raw)
-        missing = _REQUIRED_KEYS - set(data.keys())
-        if missing:
-            raise ValueError(f"В ответе Экстрактора нет ключей: {missing}")
-
-        # content_level — не оставляем на доверии модели: это факт о входе,
-        # а не суждение, поэтому при несовпадении с hint подставляем hint и
-        # только предупреждаем в лог (не считаем сбоем всего вызова —
-        # остальные поля отдельной проверки не требуют).
-        if data.get("content_level") not in _VALID_CONTENT_LEVELS or data["content_level"] != hint:
-            logger.warning(
-                "content_level модели (%r) не совпал с объективной оценкой "
-                "входа (%r) для %s (%s) — используем объективную оценку",
-                data.get("content_level"), hint, item["source"], item["link"],
-            )
-            data["content_level"] = hint
-
-        return data
-
-    except (json.JSONDecodeError, ValueError) as exc:
+    missing = _REQUIRED_KEYS - set(data.keys())
+    if missing:
         logger.error(
-            "Сбой формата ответа Экстрактора для %s (%s): %s",
-            item["source"], item["link"], exc,
+            "Экстрактор для %s (%s): в ответе нет ключей %s",
+            item["source"], item["link"], missing,
         )
         return None
-    except Exception as exc:
-        # сетевые/API-ошибки — повторы уже делает сам anthropic SDK, сдаёмся
-        logger.error(
-            "Ошибка вызова Экстрактора для %s (%s): %s", item["source"], item["link"], exc
+
+    # content_level — не оставляем на доверии модели: это факт о входе,
+    # а не суждение, поэтому при несовпадении с hint подставляем hint и
+    # только предупреждаем в лог (не считаем сбоем всего вызова —
+    # остальные поля отдельной проверки не требуют).
+    if data.get("content_level") not in _VALID_CONTENT_LEVELS or data["content_level"] != hint:
+        logger.warning(
+            "content_level модели (%r) не совпал с объективной оценкой "
+            "входа (%r) для %s (%s) — используем объективную оценку",
+            data.get("content_level"), hint, item["source"], item["link"],
         )
-        return None
+        data["content_level"] = hint
+
+    return data

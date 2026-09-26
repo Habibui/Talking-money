@@ -21,12 +21,12 @@ config.py после подтверждения id / результата A/B.
 retrieval/compression-логика появится отдельным кодом (не входит в
 сегодняшний объём работы — см. сообщение автору/менеджеру)."""
 
-import json
 import logging
 
 import anthropic
 
 from . import config
+from .llm_json import call_json_role
 
 logger = logging.getLogger(__name__)
 
@@ -177,32 +177,22 @@ def write_issue(
         f"Релевантные заметки/выпуски из архива по тегам:\n{related_block}\n"
     )
 
-    try:
-        response = client.messages.create(
-            model=config.MODEL_ANALYST,
-            max_tokens=3000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        raw = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
-        ).strip()
-
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-            if raw.lower().startswith("json"):
-                raw = raw[4:]
-
-        data, _ = json.JSONDecoder().raw_decode(raw)
-        missing = _REQUIRED_KEYS - set(data.keys())
-        if missing:
-            raise ValueError(f"В ответе Аналитика нет ключей: {missing}")
-        return data
-
-    except (json.JSONDecodeError, ValueError) as exc:
-        logger.error("Сбой формата ответа Аналитика: %s", exc)
+    # 26.09.2026 — по факту первого DRY_RUN (см. src/llm_json.py, docstring
+    # модуля) — обрыв по max_tokens посреди JSON у остальных трёх ролей
+    # оказался реальной проблемой, а не гипотетической; здесь вход (полные
+    # тексты нескольких сюжетов) не меньше, чем у Отборщика, так что бюджет
+    # тоже расширен профилактически, не дожидаясь отдельного падения именно
+    # этой роли.
+    data = call_json_role(
+        client, config.MODEL_ANALYST, SYSTEM_PROMPT, user_content,
+        max_tokens_attempts=[3500, 7000],
+        role_name="Аналитик",
+    )
+    if data is None:
         return None
-    except Exception as exc:
-        logger.error("Ошибка вызова Аналитика: %s", exc)
+
+    missing = _REQUIRED_KEYS - set(data.keys())
+    if missing:
+        logger.error("Аналитик: в ответе нет ключей %s", missing)
         return None
+    return data

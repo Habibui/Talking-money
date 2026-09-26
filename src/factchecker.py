@@ -17,6 +17,7 @@ import logging
 import anthropic
 
 from . import config
+from .llm_json import call_json_role
 
 logger = logging.getLogger(__name__)
 
@@ -152,35 +153,25 @@ def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | N
         f"Заголовки сюжетов прошлых выпусков (для паттерна 4):\n{lookback_block}\n"
     )
 
-    try:
-        response = client.messages.create(
-            model=config.MODEL_FACTCHECKER,
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        raw = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
-        ).strip()
-
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-            if raw.lower().startswith("json"):
-                raw = raw[4:]
-
-        data, _ = json.JSONDecoder().raw_decode(raw)
-        missing = _REQUIRED_KEYS - set(data.keys())
-        if missing:
-            raise ValueError(f"В ответе Фактчекера нет ключей: {missing}")
-        return data
-
-    except (json.JSONDecodeError, ValueError) as exc:
-        logger.error("Сбой формата ответа Фактчекера: %s", exc)
+    # 26.09.2026 — та же причина, что у остальных трёх ролей (см.
+    # src/llm_json.py, docstring модуля): бюджет расширен профилактически —
+    # вход здесь (черновик целиком + все использованные заметки) не меньше,
+    # чем у Аналитика, а corrected_draft в ответе дублирует весь черновик
+    # ещё раз, так что выходной JSON у этой роли и так самый длинный из
+    # четырёх.
+    data = call_json_role(
+        client, config.MODEL_FACTCHECKER, SYSTEM_PROMPT, user_content,
+        max_tokens_attempts=[4500, 9000],
+        role_name="Фактчекер",
+    )
+    if data is None:
         return None
-    except Exception as exc:
-        logger.error("Ошибка вызова Фактчекера: %s", exc)
+
+    missing = _REQUIRED_KEYS - set(data.keys())
+    if missing:
+        logger.error("Фактчекер: в ответе нет ключей %s", missing)
         return None
+    return data
 
 
 def should_block(factcheck: dict) -> tuple[bool, str]:
