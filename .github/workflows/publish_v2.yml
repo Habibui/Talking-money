@@ -1,0 +1,134 @@
+name: v2 — аналитический выпуск
+
+# 26.09.2026, вечер — минимальный запуск v2 (решение менеджера проекта, см.
+# claude/format-v2-analytical-brief.md в Cowork Project). Отдельный
+# workflow от .github/workflows/publish.yml (v1) намеренно: у v1 одна
+# точка входа (main.py) и одна кадентность (раз в ~15 минут), у v2 —
+# ДВЕ разные кадентности (Сборщик почасово, выпуск дважды в день,
+# 08:00/19:00 МСК), которые естественно развести через входной параметр
+# `mode`, а не через два независимых workflow-файла на один и тот же
+# репозиторий (сложнее координировать concurrency-группу и коммит state).
+#
+# Внешний Cloudflare Worker должен дёргать ЭТОТ workflow через
+# workflow_dispatch (GitHub API) с телом вида {"ref": "main", "inputs":
+# {"mode": "collect"}} раз в час, и отдельно {"ref": "main", "inputs":
+# {"mode": "issue"}} в 08:00 и 19:00 МСК (Worker сам переводит МСК в UTC
+# для расписания — GitHub Actions ничего не знает о часовых поясах).
+# Секреты (TELEGRAM_BOT_TOKEN и т.п.) остаются в GitHub, Worker их не
+# видит и не должен — он только вызывает workflow_dispatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "collect (почасовой Сборщик) или issue (выпуск, 08:00/19:00 МСК)"
+        required: true
+        default: "collect"
+        type: choice
+        options:
+          - collect
+          - issue
+      hours:
+        description: "окно заметок для Отборщика в часах (только mode=issue; пусто = дефолт scripts/issue_v2.py, 13ч)"
+        required: false
+        type: string
+
+  # Резервный, редкий cron — та же причина, что у v1 (см. publish.yml):
+  # если внешний Worker сломается (протухший PAT, сбой на стороне
+  # Cloudflare), это единственная страховка, что Сборщик хоть иногда
+  # срабатывает, а не останавливается ПОЛНОСТЬЮ и молча. У schedule-
+  # события нет `inputs` вообще — `github.event.inputs.mode` в этом
+  # случае будет пустым, шаг ниже подставит 'collect' через `||` — то
+  # есть резервный cron ВСЕГДА в режиме collect, никогда issue. Это
+  # осознанно: если ломается генерация выпуска, а не сбор, единственная
+  # защита сегодня — то, что автор ЗАМЕТИТ отсутствие сообщения в личке к
+  # 08:00/19:00 (тот же класс остаточного риска, что и у самого Worker'а
+  # как единой точки отказа — см. claude/format-v2-analytical-brief.md,
+  # предупреждение автору при оценке минимального запуска). Кнопки не
+  # решают эту проблему, но она принята сознательно на первую неделю.
+  schedule:
+    - cron: "23 */2 * * *"
+
+permissions:
+  contents: write  # нужно, чтобы workflow мог коммитить archive/ и state/v2_seen.json обратно
+
+concurrency:
+  group: publish-v2
+  # true — та же причина, что у v1 (см. publish.yml): нормальный прогон
+  # (и Сборщик, и выпуск) занимает существенно меньше 15 минут, так что
+  # "всё ещё жив" при следующем срабатывании = скорее всего застрял, и
+  # обрывать его — правильное поведение, а не "подождать своей очереди".
+  cancel-in-progress: true
+
+jobs:
+  run_v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Настроить Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Установить зависимости
+        run: pip install -r requirements.txt
+
+      - name: Сборщик (mode=collect)
+        if: ${{ (github.event.inputs.mode || 'collect') == 'collect' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/collect_v2.py
+
+      - name: Выпуск (mode=issue)
+        if: ${{ github.event.inputs.mode == 'issue' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_AUTHOR_CHAT_ID: ${{ secrets.TELEGRAM_AUTHOR_CHAT_ID }}
+          # Модель/effort Аналитика и Фактчекера — см. src/config.py,
+          # переопределяются здесь же через секреты/переменные ПОСЛЕ
+          # решения по воскресному A/B (V2_MODEL_ANALYST/V2_ANALYST_EFFORT
+          # и т.п.), без правки кода. Пока не заданы — работает дефолт из
+          # config.py (Sonnet 5, effort=medium).
+          V2_MODEL_ANALYST: ${{ vars.V2_MODEL_ANALYST }}
+          V2_ANALYST_EFFORT: ${{ vars.V2_ANALYST_EFFORT }}
+          V2_MODEL_FACTCHECKER: ${{ vars.V2_MODEL_FACTCHECKER }}
+          V2_FACTCHECKER_EFFORT: ${{ vars.V2_FACTCHECKER_EFFORT }}
+        run: |
+          if [ -n "${{ github.event.inputs.hours }}" ]; then
+            python scripts/issue_v2.py --hours="${{ github.event.inputs.hours }}"
+          else
+            python scripts/issue_v2.py
+          fi
+
+      - name: Закоммитить архив/state
+        # if: always() — та же причина, что у v1 (см. publish.yml,
+        # комментарий у аналогичного шага): выпуск/заметки могут успеть
+        # уйти автору/в архив ДО сбоя более позднего шага, и это не
+        # должно тихо потеряться.
+        if: always()
+        run: |
+          git config user.name "talkuyut-dengi-bot"
+          git config user.email "actions@users.noreply.github.com"
+          python scripts/commit_state_v2.py main
+
+      - name: Уведомить о сбое v2
+        # Та же логика и тот же секрет TELEGRAM_ADMIN_CHAT_ID, что у v1
+        # (publish.yml) — намеренно НЕ TELEGRAM_AUTHOR_CHAT_ID: этот секрет
+        # про технический сбой самого пайплайна, а не про редакционный
+        # контент выпуска, они разделены сознательно (см. src/config.py).
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_ADMIN_CHAT_ID" ]; then
+            echo "TELEGRAM_ADMIN_CHAT_ID не задан — пропускаем личное уведомление"
+            exit 0
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_ADMIN_CHAT_ID}" \
+            -d text="⚠️ talkuyut-dengi v2: пайплайн упал с ошибкой (mode=${{ github.event.inputs.mode || 'collect' }}). Лог: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"

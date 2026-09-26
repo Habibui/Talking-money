@@ -113,6 +113,15 @@ def maybe_flush_digest() -> None:
 
 
 def main() -> int:
+    # 26.09.2026, вечер — аварийный выключатель на момент запуска v2 (см.
+    # config.V1_DISABLED и комментарий там же). Возвращаем 0 (не 1) —
+    # это осознанный, штатный пропуск запуска, а не сбой: шаг "Уведомить о
+    # сбое" в publish.yml не должен срабатывать на каждый час просто
+    # потому, что v1 сознательно выключен.
+    if config.V1_DISABLED:
+        logger.info("V1_DISABLED=1 — v1 отключён (см. src/config.py), выходим без публикации")
+        return 0
+
     if not DRY_RUN and not check_config():
         return 1
 

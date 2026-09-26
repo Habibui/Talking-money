@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+26.09.2026, вечер — продакшен-точка входа v2 для генерации выпуска
+(минимальный запуск, решение менеджера — см. claude/format-v2-analytical-
+brief.md в Cowork Project). Запускается два раза в день, 08:00 и 19:00 МСК
+(.github/workflows/publish_v2.yml, mode=issue), Сборщик в этот скрипт НЕ
+входит — он отдельно, почасово (scripts/collect_v2.py).
+
+Отличие от scripts/dry_run_v2.py: этот скрипт РЕАЛЬНО отправляет готовый
+выпуск — не в канал (кнопок «Опубликовать»/«Отклонить» и обработчика через
+Cloudflare Worker пока нет, это вторая неделя), а ЛИЧНЫМ сообщением автору
+(TELEGRAM_AUTHOR_CHAT_ID). Автор публикует сам — пересылкой из личных
+сообщений в канал со включённым «Скрыть имя отправителя» (см. Telegram:
+удерживать сообщение → Переслать → переключатель имени отправителя).
+
+Сценарий блокировки Фактчекера (should_block() = True): ВСЕГДА уходит
+corrected_draft как основной черновик (не исходный, непроверенный) —
+Фактчекер написан именно для того, чтобы автор публиковал уже исправленную
+версию, а не оригинал с известными проблемами. Отдельным ВТОРЫМ сообщением
+уходит разбор замечаний (factchecker.format_factcheck_report()) — только
+когда есть что разбирать, то есть только при блокировке; при чистом
+прогоне второго сообщения нет.
+
+archive.append_issue() вызывается автоматически сразу после успешной
+отправки автору (status="sent_to_author") — этого достаточно для того,
+чтобы Отборщик следующего выпуска увидел заголовки через
+archive.load_last_issue_titles() (см. src/selector.py, шаг 4 промпта).
+Статус пока единственный — если появятся другие (например,
+"published"/"rejected" на второй неделе, когда добавятся кнопки), они
+допишутся отдельно, не меняя эту функцию.
+
+Запуск:
+  python3 scripts/issue_v2.py                  # окно по умолчанию (см. --hours)
+  python3 scripts/issue_v2.py --hours=13        # явное окно заметок для Отборщика
+
+ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHOR_CHAT_ID обязательны —
+без последнего скрипт не может выполнить единственную свою задачу (доставить
+выпуск автору), это явная, а не тихая ошибка (см. main() ниже)."""
+
+import argparse
+import json
+import logging
+import os
+import sys
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src import archive, config, factchecker, analyst, selector, telegram_bot, telegram_render
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("issue_v2")
+
+
+def _send_to_author(text: str, parse_mode: str | None = "HTML") -> bool:
+    ok = telegram_bot.send_message(
+        text, chat_id=config.TELEGRAM_AUTHOR_CHAT_ID, disable_preview=True, parse_mode=parse_mode,
+    )
+    if not ok:
+        logger.error("Не удалось отправить сообщение автору (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
+    return ok
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--hours", type=int, default=13,
+        help="окно заметок для Отборщика в часах (по умолчанию 13ч — покрывает больший из двух "
+             "промежутков между выпусками 08:00/19:00 МСК с небольшим запасом; повторный захват "
+             "уже отобранного сюжета Отборщик отсекает сам через сюжеты прошлых выпусков, шаг 4 "
+             "его промпта, так что запас по времени не создаёт риска задвоения)",
+    )
+    args = parser.parse_args()
+
+    missing = [
+        name for name, val in (
+            ("ANTHROPIC_API_KEY", config.ANTHROPIC_API_KEY),
+            ("TELEGRAM_BOT_TOKEN", config.TELEGRAM_BOT_TOKEN),
+            ("TELEGRAM_AUTHOR_CHAT_ID", config.TELEGRAM_AUTHOR_CHAT_ID),
+        ) if not val
+    ]
+    if missing:
+        logger.error("Не заданы обязательные переменные окружения: %s", ", ".join(missing))
+        return 1
+
+    logger.info("=== Шаг 1: Отборщик ===")
+    all_cards = archive.load_cards_since(args.hours)
+    notes_by_id = {c["id"]: c for c in all_cards}
+    candidate_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
+    logger.info(
+        "Заметок за %sч: %s всего, %s с importance >= %s",
+        args.hours, len(all_cards), len(candidate_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
+    )
+
+    last_titles = archive.load_last_issue_titles(config.V2_SELECTOR_LOOKBACK_ISSUES)
+    selection = selector.select_stories(candidate_notes, last_titles)
+    if selection is None:
+        logger.error("Отборщик не вернул результат — выпуск не сформирован в этом окне")
+        return 1
+
+    selected_ids = set(selection.get("selected_story_ids", []))
+    stories = [s for s in selection.get("stories", []) if s["story_id"] in selected_ids]
+    if not stories:
+        logger.info("Отборщик не выбрал ни одного сюжета в этом окне — выпуска не будет, это нормально")
+        return 0
+
+    logger.info("=== Шаг 2: Аналитик ===")
+    draft = analyst.write_issue(stories, notes_by_id)
+    if draft is None:
+        logger.error("Аналитик не вернул результат — выпуск не сформирован")
+        return 1
+
+    logger.info("=== Шаг 3: Фактчекер ===")
+    used_note_ids = set(draft.get("watch_next_source_ids", []))
+    for block in draft.get("blocks", []):
+        used_note_ids.update(block.get("source_ids", []))
+    factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
+
+    factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles)
+    if factcheck is None:
+        logger.error(
+            "Фактчекер не вернул результат — выпуск НЕ отправляется автору "
+            "(сбой самой проверки — не то же самое, что «проверка прошла успешно»)"
+        )
+        return 1
+
+    blocked, reason = factchecker.should_block(factcheck)
+    final_draft = factcheck.get("corrected_draft", draft)
+
+    logger.info("=== Шаг 4: рендер + отправка автору ===")
+    rendered = telegram_render.render_issue_html(final_draft)
+    is_valid, html_errors = telegram_render.validate_telegram_html(rendered)
+
+    if is_valid:
+        send_text, parse_mode = rendered, "HTML"
+    else:
+        logger.warning(
+            "HTML-разметка невалидна для Telegram (%s) — уходит текст без разметки: %s",
+            len(html_errors), "; ".join(html_errors),
+        )
+        send_text, parse_mode = telegram_render.strip_telegram_html(rendered), None
+
+    prefix = "⚠️ Фактчекер заблокировал бы публикацию — черновик ниже уже ИСПРАВЛЕН:\n\n" if blocked else ""
+    if not _send_to_author(prefix + send_text, parse_mode=parse_mode):
+        return 1
+    logger.info("Выпуск отправлен автору в личку (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
+
+    if blocked:
+        logger.warning("Фактчек заблокировал бы публикацию: %s — отправляем разбор вторым сообщением", reason)
+        report = factchecker.format_factcheck_report(factcheck)
+        _send_to_author(report, parse_mode=None)
+
+    record = {
+        "issue_id": f"v2-{datetime.now(timezone.utc).isoformat()}",
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "story_titles": [s["title"] for s in stories],
+        "draft": final_draft,
+        # 26.09.2026 — status="sent_to_author": единственный статус
+        # минимального запуска (см. docstring модуля выше) — публикация в
+        # канал делается автором вручную, скрипт этого не видит и не может
+        # отметить отдельным статусом до появления кнопок/вебхука.
+        "status": "sent_to_author",
+        "factcheck_blocked": blocked,
+    }
+    archive.append_issue(record)
+    logger.info("Выпуск записан в archive/issues.jsonl (status=sent_to_author)")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

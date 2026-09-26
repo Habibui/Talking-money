@@ -196,6 +196,51 @@ def check_issue(
     return data
 
 
+def format_factcheck_report(factcheck: dict) -> str:
+    """26.09.2026, вечер — минимальный запуск v2 (решение менеджера, п.1):
+    когда should_block(factcheck) — правда, автору вторым личным сообщением
+    уходит человекочитаемый разбор (утверждение → что не так), отдельно от
+    самого черновика (который приходит первым сообщением уже в
+    ИСПРАВЛЕННОМ виде — corrected_draft, см. scripts/issue_v2.py). Обычный
+    текст, без HTML (см. telegram_bot.send_message(parse_mode=None)) — это
+    отчёт для автора, не пост в канал, поле "note" Фактчекер пишет в
+    свободной форме, эскейпить его под HTML нет смысла.
+
+    Показывает только claims с verdict != "supported" (только их и имеет
+    смысл разбирать — "поддержано" не требует объяснения) — если таких
+    почему-то нет, а should_block всё равно True (например, только по
+    any_number_distorted без отдельного claim с этим полем, или только по
+    hook_unsupported), возвращает короткую честную заглушку, а не пустую
+    строку, чтобы автор не решил, что сообщение просто не долетело."""
+    bad_claims = [c for c in factcheck.get("claims", []) if c.get("verdict") != "supported"]
+    if not bad_claims:
+        return (
+            "Фактчекер заблокировал бы публикацию, но не привёл ни одного "
+            "конкретного claim с проблемой (см. unsupported_count/"
+            "any_number_distorted/hook_unsupported в самом факт-отчёте) — "
+            "проверьте черновик вручную перед публикацией."
+        )
+
+    lines = ["Разбор замечаний фактчекера:", ""]
+    field_labels = {
+        "hook": "Хук", "title": "Заголовок блока", "what": "Факты блока",
+        "meaning": "Интерпретация блока", "link": "Связка блока",
+        "watch_next": "Что смотреть дальше",
+    }
+    for i, claim in enumerate(bad_claims, start=1):
+        field = field_labels.get(claim.get("field"), claim.get("field", "?"))
+        block_idx = claim.get("block_index")
+        where = f"{field} (блок {block_idx})" if block_idx is not None else field
+        lines.append(f"{i}. [{where}, {claim.get('verdict', '?')}]")
+        lines.append(f"   Утверждение: {claim.get('text', '')}")
+        if claim.get("note"):
+            lines.append(f"   Что не так: {claim['note']}")
+        if claim.get("number_distorted"):
+            lines.append("   Искажена цифра/дата/сумма.")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def should_block(factcheck: dict) -> tuple[bool, str]:
     """Правило блокировки публикации из format-v2-prompts-draft.md (раздел
     4, «Правило блокировки публикации»): unsupported_count > 2 (по всем
