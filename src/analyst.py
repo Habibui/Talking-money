@@ -146,13 +146,36 @@ def write_issue(
     notes_by_id: dict,
     history_summary: str = "",
     related_notes: list[str] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    thinking_override: str | None = None,
+    on_usage=None,
 ) -> dict | None:
     """stories — отобранные Отборщиком сюжеты (selected_story_ids из его
     ответа, уже отфильтрованные вызывающим кодом). notes_by_id — {note_id:
     заметка Экстрактора} для всех note_ids, встречающихся в stories.
     history_summary/related_notes — см. docstring модуля про текущий
     ограниченный скоуп (оба опциональны). Возвращает JSON-черновик выпуска
-    или None при неустранимой ошибке."""
+    или None при неустранимой ошибке.
+
+    26.09.2026, вечер — четыре новых необязательных параметра для
+    `scripts/ab_test_analyst.py` (воскресный A/B, три модели), ни один не
+    меняет поведение обычного вызова (dry_run_v2.py и т.п.), если не
+    передан:
+    - `model`/`effort` — переопределяют `config.MODEL_ANALYST`/
+      `MODEL_ANALYST_EFFORT`. Нужно именно так, а не через переменные
+      окружения: `config.py` читает `os.environ` один раз при импорте, а
+      A/B-скрипт перебирает три разные модели за один процесс.
+    - `thinking_override` — передаётся в `llm_json.call_json_role()` как
+      есть (см. его докстринг). Единственное применение сегодня: Sonnet 5
+      в A/B тестируется с `"adaptive"`, а не с дефолтным для него
+      `"disabled"` — паритет с тем, как он реально работал бы в проде,
+      если выиграет тест (поправка менеджера 26.09.2026). Отборщик
+      (`selector.py`) этот параметр не получает и не должен — там
+      thinking остаётся всегда `disabled`, вопрос паритета с продом там не
+      стоит.
+    - `on_usage` — см. `llm_json.call_json_role()`, тот же callback,
+      прокинут без изменений."""
     if not stories:
         logger.info("Аналитик: нет отобранных сюжетов, пропускаем вызов")
         return None
@@ -187,11 +210,16 @@ def write_issue(
     # тот же max_tokens (см. src/llm_json.py, шестой пункт), а effort ниже
     # это не гарантирует полностью — лучше запас, чем повторный сбой по
     # тому же классу проблемы, что и обрыв на кириллице.
+    use_model = model or config.MODEL_ANALYST
+    use_effort = effort if effort is not None else config.MODEL_ANALYST_EFFORT
+
     data = call_json_role(
-        client, config.MODEL_ANALYST, SYSTEM_PROMPT, user_content,
+        client, use_model, SYSTEM_PROMPT, user_content,
         max_tokens_attempts=[3500, 7000, 14000],
         role_name="Аналитик",
-        effort=config.MODEL_ANALYST_EFFORT,
+        effort=use_effort,
+        thinking_override=thinking_override,
+        on_usage=on_usage,
     )
     if data is None:
         return None

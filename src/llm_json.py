@@ -183,7 +183,41 @@ Usage-объект только из `input_tokens`/`output_tokens`, thinking-т
 включены в `output_tokens` без отдельного поля) — поэтому лог даёт только
 эти две цифры плюс (когда есть блок типа `thinking`) грубую оценку по
 длине его текста в символах, явно помеченную как оценка, а не точный
-токен-счёт."""
+токен-счёт.
+
+**Правка менеджера от 26.09.2026, вечер, к самому этому фиксу (до начала
+воскресного A/B — снова превентивно, не по факту сбоя)**: effort у всех
+трёх участников теста должен быть ОДИНАКОВЫМ (medium) — включая Sonnet 5,
+а не "дефолт effort каждой модели" (это была моя ошибка в более раннем
+черновике сообщения автору: предлагал menять effort Fable 5.1 на его
+дефолт "high", что делает сравнение НЕЧЕСТНЫМ ровно по той причине, из-за
+которой весь этот механизм появился). Отдельно — паритет по thinking:
+Sonnet 5 в роли Аналитика должен участвовать в A/B тоже с `adaptive`
+thinking (не `disabled`), потому что именно так он будет реально работать
+в проде, если выиграет тест — тестировать его с `disabled` означало бы
+сравнивать не то, что реально пойдёт в продакшен. Жёсткая привязка
+`_thinking_config()` по модели (Sonnet 5 → всегда `disabled`) для ролей
+Отборщика и обычных (не A/B) вызовов Аналитика остаётся правильной — там
+thinking и в самом деле не нужен и вреден (см. четвёртый и пятый сбои
+выше). Поэтому это НЕ смена дефолта модели, а точечный override только
+для сценария A/B: новый необязательный параметр `thinking_override`
+у `call_json_role()` ниже (и, соответственно, у `analyst.write_issue()`) —
+когда передан, полностью замещает результат `_thinking_config(model)` для
+этого конкретного вызова. `selector.py` (Отборщик) этот параметр не
+принимает и не передаёт — там вопрос паритета с продом не стоит вообще
+(Отборщик всегда работает на Sonnet 5, и в A/B не участвует), так что
+поведение Отборщика этой правкой не затронуто ни при каких условиях.
+
+Также по просьбе менеджера логирование usage теперь возвращает те же
+данные вызывающему коду (`_log_usage()` возвращает dict, не только
+пишет в лог) — нужно `scripts/ab_test_analyst.py` (седьмой пункт, тот же
+день): считать ФАКТИЧЕСКУЮ стоимость каждого из шести вызовов A/B-теста
+(3 черновика Аналитика + 3 прогона Фактчекера) по реальным
+input_tokens/output_tokens, а не только смотреть числа в логе глазами.
+Новый необязательный параметр `on_usage` у `call_json_role()` — callback,
+получающий этот dict после каждого успешного вызова; `None` по умолчанию
+(текущее поведение всех существующих вызовов не меняется, см.
+регресс-тест)."""
 
 import json
 import logging
@@ -219,7 +253,7 @@ def _thinking_config(model: str) -> dict:
     return {"type": "disabled"}
 
 
-def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> None:
+def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> dict:
     """Логирует input_tokens/output_tokens по факту успешного вызова — по
     прямой просьбе менеджера проекта (26.09.2026, вечер): "пересчитаем
     бюджет по первым реальным выпускам". Честная оговорка (см. docstring
@@ -227,7 +261,14 @@ def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> None:
     output_tokens включает их без разбивки. Когда в ответе есть блок типа
     "thinking", дополнительно логируется грубая ОЦЕНКА его размера по
     числу символов (не токенов) — только чтобы было видно порядок
-    величины, не точная цифра."""
+    величины, не точная цифра.
+
+    26.09.2026, вечер (тем же днём, седьмой пункт) — дополнительно
+    возвращает те же данные как dict (раньше функция ничего не
+    возвращала — вызывающий код игнорировал результат). Нужно
+    `scripts/ab_test_analyst.py` через параметр `on_usage` у
+    `call_json_role()` ниже: считать факт-стоимость каждого прогона A/B
+    по реальным числам, не разбором текста лога."""
     usage = getattr(response, "usage", None)
     input_tokens = getattr(usage, "input_tokens", "?") if usage is not None else "?"
     output_tokens = getattr(usage, "output_tokens", "?") if usage is not None else "?"
@@ -242,6 +283,13 @@ def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> None:
         "%s%s: usage модели=%s вход=%s выход=%s%s",
         role_name, ctx, model, input_tokens, output_tokens, thinking_note,
     )
+    return {
+        "role": role_name,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "thinking_chars": thinking_chars,
+    }
 
 
 def _request_timeout(max_tokens: int) -> float:
@@ -293,6 +341,8 @@ def call_json_role(
     role_name: str,
     log_ctx: str = "",
     effort: str | None = None,
+    thinking_override: str | None = None,
+    on_usage=None,
 ) -> dict | None:
     """Вызывает модель с указанным промптом, разбирает JSON-ответ (терпимо —
     через `raw_decode`, игнорируя текст после первого валидного объекта).
@@ -310,6 +360,23 @@ def call_json_role(
     таком случае просто не передавайте его — None по умолчанию, ничего в
     запрос не добавляется).
 
+    `thinking_override` — необязателен, по умолчанию `None` (поведение не
+    меняется: thinking определяется `_thinking_config(model)`, как и
+    раньше). Когда передан ("adaptive" или "disabled"), полностью
+    замещает результат `_thinking_config(model)` для ЭТОГО вызова — см.
+    docstring модуля, седьмой пункт: единственное сегодняшнее применение —
+    `scripts/ab_test_analyst.py` заставляет Sonnet 5 в роли Аналитика
+    работать с `"adaptive"` вместо дефолтного для него `"disabled"`, для
+    паритета с тем, как он будет реально работать в проде, если выиграет
+    A/B. Не предполагается для обычных (не тестовых) вызовов ролей.
+
+    `on_usage` — необязательный callback, принимающий один аргумент (dict
+    от `_log_usage()`: role/model/input_tokens/output_tokens/
+    thinking_chars) — вызывается после каждого УСПЕШНОГО вызова модели.
+    `None` по умолчанию — ничего не меняется для существующих вызывающих.
+    Нужен `scripts/ab_test_analyst.py` для подсчёта факт-стоимости каждого
+    прогона A/B.
+
     Не проверяет обязательные ключи схемы — это ответственность вызывающего
     кода конкретной роли (у каждой роли свой набор обязательных ключей)."""
     for attempt, max_tokens in enumerate(max_tokens_attempts, start=1):
@@ -325,7 +392,12 @@ def call_json_role(
             # anthropic==0.40.0 таких параметров в сигнатуре create() ещё
             # нет, именованный аргумент упал бы с TypeError раньше любого
             # сетевого запроса (проверено на thinking= в этой же сессии).
-            extra_body = {"thinking": _thinking_config(model)}
+            extra_body = {
+                "thinking": (
+                    {"type": thinking_override} if thinking_override is not None
+                    else _thinking_config(model)
+                )
+            }
             if effort is not None:
                 extra_body["output_config"] = {"effort": effort}
 
@@ -343,7 +415,9 @@ def call_json_role(
             raw = strip_json_fences(raw)
             raw = _skip_leading_prose(raw)
             data, _ = json.JSONDecoder().raw_decode(raw)
-            _log_usage(role_name, model, response, log_ctx)
+            usage_info = _log_usage(role_name, model, response, log_ctx)
+            if on_usage is not None:
+                on_usage(usage_info)
             return data
 
         except (json.JSONDecodeError, ValueError) as exc:

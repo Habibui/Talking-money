@@ -125,7 +125,13 @@ def _format_sources(notes_by_id: dict) -> str:
     return "\n".join(lines)
 
 
-def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | None = None) -> dict | None:
+def check_issue(
+    draft: dict,
+    notes_by_id: dict,
+    last_issue_titles: list[str] | None = None,
+    model: str | None = None,
+    on_usage=None,
+) -> dict | None:
     """draft — черновик Аналитика (hook/hook_block_refs/blocks/watch_next/
     watch_next_source_ids). notes_by_id — все заметки, соответствующие
     source_id, встречающимся в draft (то же множество, что видел Аналитик —
@@ -139,7 +145,16 @@ def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | N
     (сбой самой проверки — не то же самое, что "проверка прошла успешно",
     см. main.py-конвенцию v1 про confirm_same_event с обратным умолчанием
     там, где ошибка проверки не должна ошибочно ОТКРЫВАТЬ дорогу к
-    публикации, а не блокировать её)."""
+    публикации, а не блокировать её).
+
+    26.09.2026, вечер — `model`/`on_usage`: то же самое по смыслу, что у
+    `analyst.write_issue()` (см. его докстринг), нужно
+    `scripts/ab_test_analyst.py`. В A/B Фактчекер должен оставаться на
+    ОДНОЙ и той же модели (Opus 5.5, effort=medium, дефолт из config —
+    Фактчекер сам в сравнении не участвует, см. бриф) для всех трёх
+    черновиков — `model` позволяет это явно зафиксировать в вызывающем
+    коде теста, не полагаясь на текущее значение переменной окружения
+    `V2_MODEL_FACTCHECKER` в момент запуска."""
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=90.0)
 
     lookback_block = (
@@ -162,11 +177,14 @@ def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | N
     # роль по брифу навсегда остаётся на Opus 5.5 (обязательный thinking),
     # независимо от исхода воскресного A/B — запас нужен уже сейчас, не
     # только на время теста.
+    use_model = model or config.MODEL_FACTCHECKER
+
     data = call_json_role(
-        client, config.MODEL_FACTCHECKER, SYSTEM_PROMPT, user_content,
+        client, use_model, SYSTEM_PROMPT, user_content,
         max_tokens_attempts=[4500, 9000, 18000],
         role_name="Фактчекер",
         effort=config.MODEL_FACTCHECKER_EFFORT,
+        on_usage=on_usage,
     )
     if data is None:
         return None
