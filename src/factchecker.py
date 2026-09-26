@@ -158,11 +158,15 @@ def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | N
     # вход здесь (черновик целиком + все использованные заметки) не меньше,
     # чем у Аналитика, а corrected_draft в ответе дублирует весь черновик
     # ещё раз, так что выходной JSON у этой роли и так самый длинный из
-    # четырёх.
+    # четырёх. Третий уровень (18000) — та же причина, что у Аналитика: эта
+    # роль по брифу навсегда остаётся на Opus 5.5 (обязательный thinking),
+    # независимо от исхода воскресного A/B — запас нужен уже сейчас, не
+    # только на время теста.
     data = call_json_role(
         client, config.MODEL_FACTCHECKER, SYSTEM_PROMPT, user_content,
-        max_tokens_attempts=[4500, 9000],
+        max_tokens_attempts=[4500, 9000, 18000],
         role_name="Фактчекер",
+        effort=config.MODEL_FACTCHECKER_EFFORT,
     )
     if data is None:
         return None
