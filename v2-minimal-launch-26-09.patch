@@ -1,0 +1,815 @@
+diff --git a/.github/workflows/publish.yml b/.github/workflows/publish.yml
+index ab18e24..2bd0d36 100644
+--- a/.github/workflows/publish.yml
++++ b/.github/workflows/publish.yml
+@@ -72,6 +72,11 @@ jobs:
+           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
++          # 26.09.2026, вечер — аварийный выключатель на момент запуска v2
++          # (см. src/config.py, V1_DISABLED). Переменная (vars), не секрет —
++          # значение не чувствительное. Пока не задана в GitHub — пусто,
++          # main.py трактует это как "не выключен", поведение не меняется.
++          V1_DISABLED: ${{ vars.V1_DISABLED }}
+         run: python main.py
+ 
+       - name: Закоммитить обновлённое состояние
+diff --git a/.github/workflows/publish_v2.yml b/.github/workflows/publish_v2.yml
+new file mode 100644
+index 0000000..2a5885a
+--- /dev/null
++++ b/.github/workflows/publish_v2.yml
+@@ -0,0 +1,134 @@
++name: v2 — аналитический выпуск
++
++# 26.09.2026, вечер — минимальный запуск v2 (решение менеджера проекта, см.
++# claude/format-v2-analytical-brief.md в Cowork Project). Отдельный
++# workflow от .github/workflows/publish.yml (v1) намеренно: у v1 одна
++# точка входа (main.py) и одна кадентность (раз в ~15 минут), у v2 —
++# ДВЕ разные кадентности (Сборщик почасово, выпуск дважды в день,
++# 08:00/19:00 МСК), которые естественно развести через входной параметр
++# `mode`, а не через два независимых workflow-файла на один и тот же
++# репозиторий (сложнее координировать concurrency-группу и коммит state).
++#
++# Внешний Cloudflare Worker должен дёргать ЭТОТ workflow через
++# workflow_dispatch (GitHub API) с телом вида {"ref": "main", "inputs":
++# {"mode": "collect"}} раз в час, и отдельно {"ref": "main", "inputs":
++# {"mode": "issue"}} в 08:00 и 19:00 МСК (Worker сам переводит МСК в UTC
++# для расписания — GitHub Actions ничего не знает о часовых поясах).
++# Секреты (TELEGRAM_BOT_TOKEN и т.п.) остаются в GitHub, Worker их не
++# видит и не должен — он только вызывает workflow_dispatch.
++
++on:
++  workflow_dispatch:
++    inputs:
++      mode:
++        description: "collect (почасовой Сборщик) или issue (выпуск, 08:00/19:00 МСК)"
++        required: true
++        default: "collect"
++        type: choice
++        options:
++          - collect
++          - issue
++      hours:
++        description: "окно заметок для Отборщика в часах (только mode=issue; пусто = дефолт scripts/issue_v2.py, 13ч)"
++        required: false
++        type: string
++
++  # Резервный, редкий cron — та же причина, что у v1 (см. publish.yml):
++  # если внешний Worker сломается (протухший PAT, сбой на стороне
++  # Cloudflare), это единственная страховка, что Сборщик хоть иногда
++  # срабатывает, а не останавливается ПОЛНОСТЬЮ и молча. У schedule-
++  # события нет `inputs` вообще — `github.event.inputs.mode` в этом
++  # случае будет пустым, шаг ниже подставит 'collect' через `||` — то
++  # есть резервный cron ВСЕГДА в режиме collect, никогда issue. Это
++  # осознанно: если ломается генерация выпуска, а не сбор, единственная
++  # защита сегодня — то, что автор ЗАМЕТИТ отсутствие сообщения в личке к
++  # 08:00/19:00 (тот же класс остаточного риска, что и у самого Worker'а
++  # как единой точки отказа — см. claude/format-v2-analytical-brief.md,
++  # предупреждение автору при оценке минимального запуска). Кнопки не
++  # решают эту проблему, но она принята сознательно на первую неделю.
++  schedule:
++    - cron: "23 */2 * * *"
++
++permissions:
++  contents: write  # нужно, чтобы workflow мог коммитить archive/ и state/v2_seen.json обратно
++
++concurrency:
++  group: publish-v2
++  # true — та же причина, что у v1 (см. publish.yml): нормальный прогон
++  # (и Сборщик, и выпуск) занимает существенно меньше 15 минут, так что
++  # "всё ещё жив" при следующем срабатывании = скорее всего застрял, и
++  # обрывать его — правильное поведение, а не "подождать своей очереди".
++  cancel-in-progress: true
++
++jobs:
++  run_v2:
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v7
++
++      - name: Настроить Python
++        uses: actions/setup-python@v6
++        with:
++          python-version: "3.12"
++
++      - name: Установить зависимости
++        run: pip install -r requirements.txt
++
++      - name: Сборщик (mode=collect)
++        if: ${{ (github.event.inputs.mode || 'collect') == 'collect' }}
++        env:
++          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
++        run: python scripts/collect_v2.py
++
++      - name: Выпуск (mode=issue)
++        if: ${{ github.event.inputs.mode == 'issue' }}
++        env:
++          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
++          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
++          TELEGRAM_AUTHOR_CHAT_ID: ${{ secrets.TELEGRAM_AUTHOR_CHAT_ID }}
++          # Модель/effort Аналитика и Фактчекера — см. src/config.py,
++          # переопределяются здесь же через секреты/переменные ПОСЛЕ
++          # решения по воскресному A/B (V2_MODEL_ANALYST/V2_ANALYST_EFFORT
++          # и т.п.), без правки кода. Пока не заданы — работает дефолт из
++          # config.py (Sonnet 5, effort=medium).
++          V2_MODEL_ANALYST: ${{ vars.V2_MODEL_ANALYST }}
++          V2_ANALYST_EFFORT: ${{ vars.V2_ANALYST_EFFORT }}
++          V2_MODEL_FACTCHECKER: ${{ vars.V2_MODEL_FACTCHECKER }}
++          V2_FACTCHECKER_EFFORT: ${{ vars.V2_FACTCHECKER_EFFORT }}
++        run: |
++          if [ -n "${{ github.event.inputs.hours }}" ]; then
++            python scripts/issue_v2.py --hours="${{ github.event.inputs.hours }}"
++          else
++            python scripts/issue_v2.py
++          fi
++
++      - name: Закоммитить архив/state
++        # if: always() — та же причина, что у v1 (см. publish.yml,
++        # комментарий у аналогичного шага): выпуск/заметки могут успеть
++        # уйти автору/в архив ДО сбоя более позднего шага, и это не
++        # должно тихо потеряться.
++        if: always()
++        run: |
++          git config user.name "talkuyut-dengi-bot"
++          git config user.email "actions@users.noreply.github.com"
++          python scripts/commit_state_v2.py main
++
++      - name: Уведомить о сбое v2
++        # Та же логика и тот же секрет TELEGRAM_ADMIN_CHAT_ID, что у v1
++        # (publish.yml) — намеренно НЕ TELEGRAM_AUTHOR_CHAT_ID: этот секрет
++        # про технический сбой самого пайплайна, а не про редакционный
++        # контент выпуска, они разделены сознательно (см. src/config.py).
++        if: failure()
++        env:
++          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
++          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
++        run: |
++          if [ -z "$TELEGRAM_ADMIN_CHAT_ID" ]; then
++            echo "TELEGRAM_ADMIN_CHAT_ID не задан — пропускаем личное уведомление"
++            exit 0
++          fi
++          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
++            -d chat_id="${TELEGRAM_ADMIN_CHAT_ID}" \
++            -d text="⚠️ talkuyut-dengi v2: пайплайн упал с ошибкой (mode=${{ github.event.inputs.mode || 'collect' }}). Лог: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+diff --git a/README.md b/README.md
+index 7f195a5..03ad2f7 100644
+--- a/README.md
++++ b/README.md
+@@ -84,6 +84,74 @@ API-ключ, отозван токен бота, недоступен исто
+ уведомлений о сбоях не будет (шаг уведомления в этом случае тихо ничего не
+ отправит).
+ 
++## v2 — минимальный запуск (аналитический выпуск, без кнопок)
++
++26.09.2026, вечер — решение менеджера проекта: запускаем v2 в минимальной
++конфигурации (без кнопок «Опубликовать»/«Отклонить» и без обработчика через
++Cloudflare Worker — это вторая неделя). Выпуск дважды в день (08:00/19:00
++МСК) уходит АВТОРУ В ЛИЧКУ, автор публикует в канал сам — пересылкой из
++личных сообщений со включённым «Скрыть имя отправителя» (в Telegram:
++удержать сообщение → Переслать → переключатель имени отправителя). v1
++продолжает работать параллельно до момента явного переключения (см. ниже).
++
++### Новые секреты репозитория
++
++Кроме уже описанных выше (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
++`ANTHROPIC_API_KEY`, `TELEGRAM_ADMIN_CHAT_ID`) — добавить:
++
++| Имя | Что туда | Где взять |
++|---|---|---|
++| `TELEGRAM_AUTHOR_CHAT_ID` | твой личный числовой id — сюда v2 присылает готовый выпуск на проверку/публикацию | так же, как `TELEGRAM_ADMIN_CHAT_ID` выше (шаги 1-3) — можно поставить то же самое число, если это один и тот же человек; это ДВА разных секрета в GitHub (один про технические сбои, другой про сам редакционный контент), даже если значение совпадает |
++
++Плюс одна переменная (не секрет — не чувствительное значение): **GitHub** →
++**Settings** этого репозитория → **Secrets and variables** → **Actions** →
++вкладка **Variables** → **New repository variable**:
++
++| Имя | Значение | Когда ставить |
++|---|---|---|
++| `V1_DISABLED` | `1` | В МОМЕНТ переключения на v2 — см. «Отключение v1» ниже. Пока не задана (или любое другое значение) — v1 работает как обычно. |
++
++Модель/effort Аналитика и Фактчекера после результата воскресного A/B —
++тоже переменные (Variables, не секреты): `V2_MODEL_ANALYST`,
++`V2_ANALYST_EFFORT`, `V2_MODEL_FACTCHECKER`, `V2_FACTCHECKER_EFFORT` (см.
++`src/config.py` — пока не заданы, действует дефолт: Sonnet 5, effort=medium
++у обоих).
++
++### Настройка Cloudflare Worker для v2
++
++Новый workflow `.github/workflows/publish_v2.yml` принимает
++`workflow_dispatch` с полями `mode` (`collect` или `issue`) и, опционально,
++`hours` (только для `mode=issue`). Cloudflare Worker должен дёргать GitHub
++API (`POST /repos/<owner>/<repo>/actions/workflows/publish_v2.yml/dispatches`)
++с телом:
++
++- Каждый час: `{"ref": "main", "inputs": {"mode": "collect"}}`
++- В 08:00 МСК: `{"ref": "main", "inputs": {"mode": "issue"}}`
++- В 19:00 МСК: `{"ref": "main", "inputs": {"mode": "issue"}}`
++
++Worker сам переводит МСК в UTC под свои cron-триггеры — GitHub Actions
++ничего не знает о часовых поясах. Токен для вызова GitHub API у Worker'а —
++тот же PAT, что уже используется для v1 (`publish.yml`), права не меняются
++(тот же repo, тот же workflow_dispatch).
++
++### Отключение v1 (в момент запуска v2 — без двойной публикации)
++
++1. **GitHub** → **Settings** → **Secrets and variables** → **Actions** →
++   **Variables** → задать `V1_DISABLED` = `1` (см. таблицу выше). Со
++   следующего срабатывания (по расписанию Cloudflare Worker или резервному
++   cron) `main.py` будет сразу выходить без публикации — это штатный
++   пропуск, не ошибка (в логе запуска будет видно сообщение об этом, шаг
++   «Уведомить о сбое» НЕ сработает).
++2. Отдельно — в самом Cloudflare Worker можно (не обязательно сразу, раз
++   `V1_DISABLED` уже гарантирует отсутствие публикации) отключить или
++   удалить cron-триггер, который дёргает `publish.yml` — чтобы не тратить
++   вызовы Worker'а впустую. Это на стороне Cloudflare, вне этого
++   репозитория — сделать может тот, у кого есть доступ к дашборду
++   Cloudflare.
++3. Если понадобится откатиться на v1 — просто убрать/сменить значение
++   `V1_DISABLED` (или снова включить cron/Worker-триггер на `publish.yml`,
++   если его отключали).
++
+ ## Известные ограничения
+ 
+ - Расписание GitHub Actions (`schedule`) — это гарантия «не раньше», а не
+diff --git a/main.py b/main.py
+index 5474b8c..8badf56 100644
+--- a/main.py
++++ b/main.py
+@@ -113,6 +113,15 @@ def maybe_flush_digest() -> None:
+ 
+ 
+ def main() -> int:
++    # 26.09.2026, вечер — аварийный выключатель на момент запуска v2 (см.
++    # config.V1_DISABLED и комментарий там же). Возвращаем 0 (не 1) —
++    # это осознанный, штатный пропуск запуска, а не сбой: шаг "Уведомить о
++    # сбое" в publish.yml не должен срабатывать на каждый час просто
++    # потому, что v1 сознательно выключен.
++    if config.V1_DISABLED:
++        logger.info("V1_DISABLED=1 — v1 отключён (см. src/config.py), выходим без публикации")
++        return 0
++
+     if not DRY_RUN and not check_config():
+         return 1
+ 
+diff --git a/scripts/collect_v2.py b/scripts/collect_v2.py
+new file mode 100644
+index 0000000..bc9a7fc
+--- /dev/null
++++ b/scripts/collect_v2.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++"""
++26.09.2026, вечер — продакшен-точка входа v2 для почасового режима
++(минимальный запуск, решение менеджера, п.4 «отдельный workflow v2»).
++В отличие от scripts/dry_run_v2.py (весь пайплайн одним ручным запуском,
++ничего не публикует, для локальной проверки человеком) — этот скрипт
++запускает ТОЛЬКО Сборщик (src.collector.run()) и предназначен для
++регулярного автоматического запуска (см. .github/workflows/publish_v2.yml,
++mode=collect): раз в час дёргается внешним Cloudflare Worker так же, как
++main.py у v1 (см. README.md), плюс редкий резервный cron в самом workflow.
++
++Ничего не публикует в Telegram — Сборщик только копит архив заметок
++(archive/cards/, state/v2_seen.json). Публикация/отправка автору — отдельный
++шаг, scripts/issue_v2.py, два раза в день.
++"""
++
++import logging
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from src import collector, config
++
++logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
++logger = logging.getLogger("collect_v2")
++
++
++def main() -> int:
++    if not config.ANTHROPIC_API_KEY:
++        logger.error("ANTHROPIC_API_KEY не задан — Экстрактор не сможет вызвать Claude API")
++        return 1
++
++    stats = collector.run()
++    logger.info("Сборщик (продакшен, почасовой режим): %s", stats)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts/commit_state_v2.py b/scripts/commit_state_v2.py
+new file mode 100644
+index 0000000..04fcba4
+--- /dev/null
++++ b/scripts/commit_state_v2.py
+@@ -0,0 +1,190 @@
++#!/usr/bin/env python3
++"""
++26.09.2026, вечер — коммитит и пушит state/v2_seen.json и новые/изменённые
++archive/cards/*.jsonl + archive/issues.jsonl после запуска
++scripts/collect_v2.py или scripts/issue_v2.py, устойчиво к гонке push —
++ОТДЕЛЬНЫЙ скрипт от scripts/commit_state.py (v1), не переиспользует его
++код напрямую: у v2 другая форма файлов (построчный JSONL + множество
++date-partitioned файлов в archive/cards/, а не фиксированный список
++JSON-объектов), поэтому и слияние другое. ОБЩАЯ СХЕМА (коммит -> если push
++не прошёл -> fetch + слить по смыслу -> reset --soft на свежий origin ->
++коммит заново -> повторить, до MAX_ATTEMPTS раз) взята буквально из
++commit_state.py — тот же класс проблемы (два запуска пушат почти
++одновременно), тот же по духу фикс, уже проверенный на практике этим же
++пайплайном (см. её собственный docstring про дубль поста Texas Stock
++Exchange 10.09.2026).
++
++Слияние:
++- state/v2_seen.json — как posted.json у v1: множество id, объединяем как
++  множества (порядок не важен), обрезаем до V2_MAX_SEEN_IDS.
++- archive/cards/*.jsonl и archive/issues.jsonl — построчный JSON,
++  объединяем как множество СТРОК (не парсим построчно) — сама строка
++  целиком уже уникально идентифицирует запись, порядок внутри файла не
++  важен ни Отборщику, ни Аналитику (читают файл целиком, не по позиции).
++
++Известный, ПРИНЯТЫЙ (не случайно упущенный) остаточный риск: если два
++Сборщика реально пересекутся по времени (что при concurrency:
++cancel-in-progress: true в .github/workflows/publish_v2.yml не должно
++происходить в норме — см. комментарий там же, тот же принцип, что и у
++publish.yml v1) и независимо разберут одну и ту же статью, в архиве
++останутся ДВЕ строки с одним id, но разным extracted_at — построчный
++дедуп по точному совпадению строки это не поймает (строки не идентичны).
++Не устраняем это здесь намеренно: правильная защита — не дать самим
++запускам пересекаться (concurrency в workflow), а не гоняться за
++построчным JSON-дедупом ради сценария, которого и так не должно быть;
++безвредный дубль в архиве (не двойная ПУБЛИКАЦИЯ, не показывается
++читателю) — приемлемая цена простоты."""
++
++import json
++import random
++import subprocess
++import sys
++import time
++
++V2_JSON_STATE_FILES = ["state/v2_seen.json"]
++V2_ISSUES_PATH = "archive/issues.jsonl"
++V2_MAX_SEEN_IDS = 5000  # держать в синхроне с config.V2_MAX_SEEN_IDS
++
++MAX_ATTEMPTS = 5
++
++
++def run(cmd, check=True):
++    return subprocess.run(cmd, capture_output=True, text=True, check=check)
++
++
++def load_json(path):
++    try:
++        with open(path, encoding="utf-8") as f:
++            return json.load(f)
++    except FileNotFoundError:
++        return None
++
++
++def save_json(path, data):
++    with open(path, "w", encoding="utf-8") as f:
++        json.dump(data, f, ensure_ascii=False, indent=2)
++        f.write("\n")
++
++
++def load_lines(path):
++    try:
++        with open(path, encoding="utf-8") as f:
++            return [line.rstrip("\n") for line in f if line.strip()]
++    except FileNotFoundError:
++        return None
++
++
++def save_lines(path, lines):
++    with open(path, "w", encoding="utf-8") as f:
++        for line in lines:
++            f.write(line + "\n")
++
++
++def git_show_text(ref, path):
++    result = run(["git", "show", f"{ref}:{path}"], check=False)
++    if result.returncode != 0:
++        return None
++    return result.stdout
++
++
++def changed_jsonl_paths():
++    """archive/cards/*.jsonl с реальными изменениями в рабочем дереве
++    (новые или изменённые файлы) плюс archive/issues.jsonl, если он
++    существует (проверяется на «изменился ли» позже, через
++    git diff --cached --quiet — здесь достаточно включить его в
++    кандидаты)."""
++    status = run(["git", "status", "--porcelain", "archive/cards/"], check=False).stdout
++    paths = []
++    for line in status.splitlines():
++        path = line[3:].strip()
++        if path and path not in paths:
++            paths.append(path)
++    if load_lines(V2_ISSUES_PATH) is not None and V2_ISSUES_PATH not in paths:
++        paths.append(V2_ISSUES_PATH)
++    return paths
++
++
++def merge_seen(mine, theirs):
++    if theirs is None:
++        return mine
++    if mine is None:
++        return theirs
++    merged_ids = list(dict.fromkeys(theirs.get("ids", []) + mine.get("ids", [])))
++    return {"ids": merged_ids[-V2_MAX_SEEN_IDS:]}
++
++
++def merge_jsonl_union(mine_lines, theirs_text):
++    theirs_lines = [line for line in (theirs_text or "").splitlines() if line.strip()]
++    if mine_lines is None:
++        mine_lines = []
++    return list(dict.fromkeys(theirs_lines + mine_lines))
++
++
++def merge_state_with_origin(branch, jsonl_paths):
++    for path in V2_JSON_STATE_FILES:
++        mine = load_json(path)
++        theirs_raw = git_show_text(f"origin/{branch}", path)
++        theirs = json.loads(theirs_raw) if theirs_raw else None
++        merged = merge_seen(mine, theirs)
++        if merged is not None:
++            save_json(path, merged)
++
++    for path in jsonl_paths:
++        mine_lines = load_lines(path)
++        theirs_text = git_show_text(f"origin/{branch}", path)
++        merged_lines = merge_jsonl_union(mine_lines, theirs_text)
++        if merged_lines:
++            save_lines(path, merged_lines)
++
++
++def stage_existing(paths):
++    for path in paths:
++        run(["git", "add", path], check=False)
++
++
++def main() -> int:
++    branch = sys.argv[1] if len(sys.argv) > 1 else "main"
++
++    run(["git", "config", "user.name", "talkuyut-dengi-bot"])
++    run(["git", "config", "user.email", "actions@users.noreply.github.com"])
++
++    jsonl_paths = changed_jsonl_paths()
++    all_paths = V2_JSON_STATE_FILES + jsonl_paths
++    stage_existing(all_paths)
++
++    if run(["git", "diff", "--cached", "--quiet"], check=False).returncode == 0:
++        print("Нет изменений в v2-состоянии/архиве — коммитить нечего")
++        return 0
++
++    run(["git", "commit", "-m", "chore(v2): обновить архив/state [skip ci]"])
++
++    for attempt in range(1, MAX_ATTEMPTS + 1):
++        push = run(["git", "push", "origin", f"HEAD:{branch}"], check=False)
++        if push.returncode == 0:
++            print(f"push успешен (попытка {attempt})")
++            return 0
++
++        print(f"push не прошёл (попытка {attempt}/{MAX_ATTEMPTS}): {push.stderr.strip()}")
++        if attempt == MAX_ATTEMPTS:
++            break
++
++        run(["git", "fetch", "origin", branch], check=True)
++        merge_state_with_origin(branch, jsonl_paths)
++        stage_existing(all_paths)
++
++        run(["git", "reset", "--soft", f"origin/{branch}"], check=True)
++        stage_existing(all_paths)
++
++        if run(["git", "diff", "--cached", "--quiet"], check=False).returncode == 0:
++            print("После слияния изменений не осталось — конкурентный запуск уже всё учёл")
++            return 0
++
++        run(["git", "commit", "-m", "chore(v2): обновить архив/state [skip ci]"])
++        time.sleep(random.uniform(1, 5))
++
++    print(f"Не удалось запушить v2-состояние после {MAX_ATTEMPTS} попыток")
++    return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts/issue_v2.py b/scripts/issue_v2.py
+new file mode 100644
+index 0000000..0a417b1
+--- /dev/null
++++ b/scripts/issue_v2.py
+@@ -0,0 +1,172 @@
++#!/usr/bin/env python3
++"""
++26.09.2026, вечер — продакшен-точка входа v2 для генерации выпуска
++(минимальный запуск, решение менеджера — см. claude/format-v2-analytical-
++brief.md в Cowork Project). Запускается два раза в день, 08:00 и 19:00 МСК
++(.github/workflows/publish_v2.yml, mode=issue), Сборщик в этот скрипт НЕ
++входит — он отдельно, почасово (scripts/collect_v2.py).
++
++Отличие от scripts/dry_run_v2.py: этот скрипт РЕАЛЬНО отправляет готовый
++выпуск — не в канал (кнопок «Опубликовать»/«Отклонить» и обработчика через
++Cloudflare Worker пока нет, это вторая неделя), а ЛИЧНЫМ сообщением автору
++(TELEGRAM_AUTHOR_CHAT_ID). Автор публикует сам — пересылкой из личных
++сообщений в канал со включённым «Скрыть имя отправителя» (см. Telegram:
++удерживать сообщение → Переслать → переключатель имени отправителя).
++
++Сценарий блокировки Фактчекера (should_block() = True): ВСЕГДА уходит
++corrected_draft как основной черновик (не исходный, непроверенный) —
++Фактчекер написан именно для того, чтобы автор публиковал уже исправленную
++версию, а не оригинал с известными проблемами. Отдельным ВТОРЫМ сообщением
++уходит разбор замечаний (factchecker.format_factcheck_report()) — только
++когда есть что разбирать, то есть только при блокировке; при чистом
++прогоне второго сообщения нет.
++
++archive.append_issue() вызывается автоматически сразу после успешной
++отправки автору (status="sent_to_author") — этого достаточно для того,
++чтобы Отборщик следующего выпуска увидел заголовки через
++archive.load_last_issue_titles() (см. src/selector.py, шаг 4 промпта).
++Статус пока единственный — если появятся другие (например,
++"published"/"rejected" на второй неделе, когда добавятся кнопки), они
++допишутся отдельно, не меняя эту функцию.
++
++Запуск:
++  python3 scripts/issue_v2.py                  # окно по умолчанию (см. --hours)
++  python3 scripts/issue_v2.py --hours=13        # явное окно заметок для Отборщика
++
++ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHOR_CHAT_ID обязательны —
++без последнего скрипт не может выполнить единственную свою задачу (доставить
++выпуск автору), это явная, а не тихая ошибка (см. main() ниже)."""
++
++import argparse
++import json
++import logging
++import os
++import sys
++from datetime import datetime, timezone
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from src import archive, config, factchecker, analyst, selector, telegram_bot, telegram_render
++
++logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
++logger = logging.getLogger("issue_v2")
++
++
++def _send_to_author(text: str, parse_mode: str | None = "HTML") -> bool:
++    ok = telegram_bot.send_message(
++        text, chat_id=config.TELEGRAM_AUTHOR_CHAT_ID, disable_preview=True, parse_mode=parse_mode,
++    )
++    if not ok:
++        logger.error("Не удалось отправить сообщение автору (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
++    return ok
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument(
++        "--hours", type=int, default=13,
++        help="окно заметок для Отборщика в часах (по умолчанию 13ч — покрывает больший из двух "
++             "промежутков между выпусками 08:00/19:00 МСК с небольшим запасом; повторный захват "
++             "уже отобранного сюжета Отборщик отсекает сам через сюжеты прошлых выпусков, шаг 4 "
++             "его промпта, так что запас по времени не создаёт риска задвоения)",
++    )
++    args = parser.parse_args()
++
++    missing = [
++        name for name, val in (
++            ("ANTHROPIC_API_KEY", config.ANTHROPIC_API_KEY),
++            ("TELEGRAM_BOT_TOKEN", config.TELEGRAM_BOT_TOKEN),
++            ("TELEGRAM_AUTHOR_CHAT_ID", config.TELEGRAM_AUTHOR_CHAT_ID),
++        ) if not val
++    ]
++    if missing:
++        logger.error("Не заданы обязательные переменные окружения: %s", ", ".join(missing))
++        return 1
++
++    logger.info("=== Шаг 1: Отборщик ===")
++    all_cards = archive.load_cards_since(args.hours)
++    notes_by_id = {c["id"]: c for c in all_cards}
++    candidate_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
++    logger.info(
++        "Заметок за %sч: %s всего, %s с importance >= %s",
++        args.hours, len(all_cards), len(candidate_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
++    )
++
++    last_titles = archive.load_last_issue_titles(config.V2_SELECTOR_LOOKBACK_ISSUES)
++    selection = selector.select_stories(candidate_notes, last_titles)
++    if selection is None:
++        logger.error("Отборщик не вернул результат — выпуск не сформирован в этом окне")
++        return 1
++
++    selected_ids = set(selection.get("selected_story_ids", []))
++    stories = [s for s in selection.get("stories", []) if s["story_id"] in selected_ids]
++    if not stories:
++        logger.info("Отборщик не выбрал ни одного сюжета в этом окне — выпуска не будет, это нормально")
++        return 0
++
++    logger.info("=== Шаг 2: Аналитик ===")
++    draft = analyst.write_issue(stories, notes_by_id)
++    if draft is None:
++        logger.error("Аналитик не вернул результат — выпуск не сформирован")
++        return 1
++
++    logger.info("=== Шаг 3: Фактчекер ===")
++    used_note_ids = set(draft.get("watch_next_source_ids", []))
++    for block in draft.get("blocks", []):
++        used_note_ids.update(block.get("source_ids", []))
++    factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
++
++    factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles)
++    if factcheck is None:
++        logger.error(
++            "Фактчекер не вернул результат — выпуск НЕ отправляется автору "
++            "(сбой самой проверки — не то же самое, что «проверка прошла успешно»)"
++        )
++        return 1
++
++    blocked, reason = factchecker.should_block(factcheck)
++    final_draft = factcheck.get("corrected_draft", draft)
++
++    logger.info("=== Шаг 4: рендер + отправка автору ===")
++    rendered = telegram_render.render_issue_html(final_draft)
++    is_valid, html_errors = telegram_render.validate_telegram_html(rendered)
++
++    if is_valid:
++        send_text, parse_mode = rendered, "HTML"
++    else:
++        logger.warning(
++            "HTML-разметка невалидна для Telegram (%s) — уходит текст без разметки: %s",
++            len(html_errors), "; ".join(html_errors),
++        )
++        send_text, parse_mode = telegram_render.strip_telegram_html(rendered), None
++
++    prefix = "⚠️ Фактчекер заблокировал бы публикацию — черновик ниже уже ИСПРАВЛЕН:\n\n" if blocked else ""
++    if not _send_to_author(prefix + send_text, parse_mode=parse_mode):
++        return 1
++    logger.info("Выпуск отправлен автору в личку (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
++
++    if blocked:
++        logger.warning("Фактчек заблокировал бы публикацию: %s — отправляем разбор вторым сообщением", reason)
++        report = factchecker.format_factcheck_report(factcheck)
++        _send_to_author(report, parse_mode=None)
++
++    record = {
++        "issue_id": f"v2-{datetime.now(timezone.utc).isoformat()}",
++        "published_at": datetime.now(timezone.utc).isoformat(),
++        "story_titles": [s["title"] for s in stories],
++        "draft": final_draft,
++        # 26.09.2026 — status="sent_to_author": единственный статус
++        # минимального запуска (см. docstring модуля выше) — публикация в
++        # канал делается автором вручную, скрипт этого не видит и не может
++        # отметить отдельным статусом до появления кнопок/вебхука.
++        "status": "sent_to_author",
++        "factcheck_blocked": blocked,
++    }
++    archive.append_issue(record)
++    logger.info("Выпуск записан в archive/issues.jsonl (status=sent_to_author)")
++
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/config.py b/src/config.py
+index 407488b..45e310e 100644
+--- a/src/config.py
++++ b/src/config.py
+@@ -13,6 +13,30 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")  # например "@talkuyut_dengi" или числовой id канала
+ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ 
++# 26.09.2026, вечер — минимальный запуск v2 (решение менеджера проекта):
++# личный числовой chat_id автора в Telegram (НЕ канал) — сюда v2 присылает
++# готовый выпуск на ручную проверку/публикацию (пересылка из личных
++# сообщений в канал самим автором, см. scripts/issue_v2.py). Отдельный
++# секрет от TELEGRAM_ADMIN_CHAT_ID ниже: тот — про технические сбои
++# пайплайна, этот — про сам редакционный контент; для одного и того же
++# человека они могут совпадать по значению, но это два разных секрета в
++# GitHub, не переиспользование одного. Получается тем же способом, что и
++# TELEGRAM_ADMIN_CHAT_ID (см. README.md, «Уведомления о сбоях»): написать
++# что угодно личному боту, затем прочитать chat.id через getUpdates.
++TELEGRAM_AUTHOR_CHAT_ID = os.environ.get("TELEGRAM_AUTHOR_CHAT_ID", "")
++
++# 26.09.2026, вечер — аварийный выключатель v1 на момент запуска v2
++# (решение менеджера, п.5 минимального запуска): переключается ОДНОЙ
++# переменной окружения/секретом в GitHub Actions, без необходимости
++# трогать сам Cloudflare Worker (который продолжит дёргать
++# .github/workflows/publish.yml по старому расписанию) и без удаления
++# publish.yml — main.py просто выходит сразу же, ничего не делая, если
++# флаг включён (см. main() ниже). Так cutover — это один клик в GitHub
++# Secrets/Variables в нужный момент, а не координация двух систем
++# (GitHub + Cloudflare) одновременно, что было бы предметно рискованнее
++# именно в момент переключения.
++V1_DISABLED = os.environ.get("V1_DISABLED", "") == "1"
++
+ # --- Модель для перевода + комментария --------------------------------------
+ 
+ # 24.09.2026, утро — перешли с Claude Haiku 4.5 на Claude Sonnet 5 (причина
+diff --git a/src/factchecker.py b/src/factchecker.py
+index f41b691..bdd4885 100644
+--- a/src/factchecker.py
++++ b/src/factchecker.py
+@@ -196,6 +196,51 @@ def check_issue(
+     return data
+ 
+ 
++def format_factcheck_report(factcheck: dict) -> str:
++    """26.09.2026, вечер — минимальный запуск v2 (решение менеджера, п.1):
++    когда should_block(factcheck) — правда, автору вторым личным сообщением
++    уходит человекочитаемый разбор (утверждение → что не так), отдельно от
++    самого черновика (который приходит первым сообщением уже в
++    ИСПРАВЛЕННОМ виде — corrected_draft, см. scripts/issue_v2.py). Обычный
++    текст, без HTML (см. telegram_bot.send_message(parse_mode=None)) — это
++    отчёт для автора, не пост в канал, поле "note" Фактчекер пишет в
++    свободной форме, эскейпить его под HTML нет смысла.
++
++    Показывает только claims с verdict != "supported" (только их и имеет
++    смысл разбирать — "поддержано" не требует объяснения) — если таких
++    почему-то нет, а should_block всё равно True (например, только по
++    any_number_distorted без отдельного claim с этим полем, или только по
++    hook_unsupported), возвращает короткую честную заглушку, а не пустую
++    строку, чтобы автор не решил, что сообщение просто не долетело."""
++    bad_claims = [c for c in factcheck.get("claims", []) if c.get("verdict") != "supported"]
++    if not bad_claims:
++        return (
++            "Фактчекер заблокировал бы публикацию, но не привёл ни одного "
++            "конкретного claim с проблемой (см. unsupported_count/"
++            "any_number_distorted/hook_unsupported в самом факт-отчёте) — "
++            "проверьте черновик вручную перед публикацией."
++        )
++
++    lines = ["Разбор замечаний фактчекера:", ""]
++    field_labels = {
++        "hook": "Хук", "title": "Заголовок блока", "what": "Факты блока",
++        "meaning": "Интерпретация блока", "link": "Связка блока",
++        "watch_next": "Что смотреть дальше",
++    }
++    for i, claim in enumerate(bad_claims, start=1):
++        field = field_labels.get(claim.get("field"), claim.get("field", "?"))
++        block_idx = claim.get("block_index")
++        where = f"{field} (блок {block_idx})" if block_idx is not None else field
++        lines.append(f"{i}. [{where}, {claim.get('verdict', '?')}]")
++        lines.append(f"   Утверждение: {claim.get('text', '')}")
++        if claim.get("note"):
++            lines.append(f"   Что не так: {claim['note']}")
++        if claim.get("number_distorted"):
++            lines.append("   Искажена цифра/дата/сумма.")
++        lines.append("")
++    return "\n".join(lines).strip()
++
++
+ def should_block(factcheck: dict) -> tuple[bool, str]:
+     """Правило блокировки публикации из format-v2-prompts-draft.md (раздел
+     4, «Правило блокировки публикации»): unsupported_count > 2 (по всем
+diff --git a/src/telegram_bot.py b/src/telegram_bot.py
+index b73fdc9..4197cc9 100644
+--- a/src/telegram_bot.py
++++ b/src/telegram_bot.py
+@@ -79,7 +79,13 @@ def build_digest_messages(queue_items: list, intro_ru: str | None = None) -> lis
+     return [header(i, total) + divider.join(part_blocks) for i, part_blocks in enumerate(parts, start=1)]
+ 
+ 
+-def send_message(text: str, silent: bool = False, disable_preview: bool = False) -> bool:
++def send_message(
++    text: str,
++    silent: bool = False,
++    disable_preview: bool = False,
++    chat_id: str | None = None,
++    parse_mode: str | None = "HTML",
++) -> bool:
+     """silent=True шлёт сообщение без звука/вибрации у подписчиков
+     (Telegram disable_notification) — сам пост при этом появляется в канале
+     сразу же, ничего не задерживается. Используется ночью (23:00–08:00 МСК,
+@@ -95,15 +101,26 @@ def send_message(text: str, silent: bool = False, disable_preview: bool = False)
+     подписчик видит превью только последней добавленной в дайджест новости,
+     как будто весь пост про неё одну, а остальные новости в дайджесте
+     выглядят "без картинки". Для одиночного поста, где ссылка ровно одна,
+-    этой проблемы нет."""
++    этой проблемы нет.
++
++    26.09.2026, вечер — `chat_id`/`parse_mode` необязательны, по умолчанию
++    не меняют поведение (chat_id=None → config.TELEGRAM_CHAT_ID, как и
++    раньше; parse_mode="HTML", как и раньше). Нужны scripts/issue_v2.py
++    (минимальный запуск v2, решение менеджера): выпуск и разбор ошибок
++    фактчекера уходят не в канал, а в личку автору (chat_id=
++    config.TELEGRAM_AUTHOR_CHAT_ID), причём разбор ошибок — обычным
++    текстом, без HTML (parse_mode=None) — это отчёт для автора, а не пост
++    в канал, там нет смысла рисковать HTML-эскейпингом текста, который сам
++    же Фактчекер написал в свободной форме (`note` в claims)."""
+     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+     payload = {
+-        "chat_id": config.TELEGRAM_CHAT_ID,
++        "chat_id": chat_id if chat_id is not None else config.TELEGRAM_CHAT_ID,
+         "text": text,
+-        "parse_mode": "HTML",
+         "disable_web_page_preview": disable_preview,
+         "disable_notification": silent,
+     }
++    if parse_mode is not None:
++        payload["parse_mode"] = parse_mode
+     try:
+         resp = requests.post(url, json=payload, timeout=config.REQUEST_TIMEOUT)
+         if resp.status_code != 200:

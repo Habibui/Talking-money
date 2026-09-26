@@ -1,0 +1,646 @@
+diff --git a/.gitignore b/.gitignore
+index 448aa36..d5fc76a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -3,3 +3,10 @@ __pycache__/
+ .env
+ venv/
+ .venv/
++
++# 26.09.2026 — вывод scripts/ab_test_analyst.py (воскресный A/B Аналитика):
++# черновики + фактчек для чтения вслепую и технический файл с
++# соответствием буква<->модель/usage/стоимость. Эфемерные тестовые
++# артефакты одного прогона, не часть архива/истории пайплайна (в отличие
++# от archive/cards/ и archive/issues.jsonl) — не коммитим.
++ab_test_output/
+diff --git a/scripts/ab_test_analyst.py b/scripts/ab_test_analyst.py
+new file mode 100644
+index 0000000..daf458a
+--- /dev/null
++++ b/scripts/ab_test_analyst.py
+@@ -0,0 +1,367 @@
++#!/usr/bin/env python3
++"""
++27-28.09.2026 (выходные) — A/B/C-тест Аналитика на трёх моделях
++(Sonnet 5 / Opus 5.5 / Fable 5.1) на ОДНОМ и том же входе от Отборщика,
++вслепую для автора. Точные требования — менеджер проекта, 26.09.2026,
++вечер (см. claude/format-v2-analytical-brief.md в Cowork Project, «Ответ
++менеджера проекта (26.09.2026)», пункт 3):
++
++  - Отборщик запускается ОДИН раз, его выход замораживается в файл — все
++    три Аналитика получают идентичный вход. Реализовано буквально: первый
++    запуск этого скрипта в календарный день вызывает Отборщик и пишет
++    результат в ab_test_output/selector_frozen_<дата>.json; ЛЮБОЙ
++    повторный запуск в тот же день по умолчанию использует этот файл, а
++    не гоняет Отборщик снова (--force-reselect — если это осознанно
++    нужно; --input <путь> — явно указать другой замороженный файл).
++  - Фактчекер — один и тот же (Opus 5.5, effort=medium, см.
++    FACTCHECKER_MODEL/FACTCHECKER_EFFORT ниже) для всех трёх черновиков;
++    по каждому фиксируются unsupported_count/any_number_distorted/
++    hook_unsupported.
++  - effort — ОДИНАКОВЫЙ (medium) у всех трёх участников, включая Sonnet 5
++    (поправка менеджера 26.09.2026: НЕ дефолт каждой модели — более
++    раннее сообщение автору предлагало выставить Fable 5.1 на его дефолт
++    "high", это была ошибка именно того рода, ради которого effort и
++    появился как явный параметр).
++  - Sonnet 5 в роли Аналитика — с adaptive thinking (не disabled), для
++    паритета с тем, как он будет реально работать в проде, если выиграет
++    A/B (поправка менеджера 26.09.2026, п.2). Реализовано через
++    `thinking_override="adaptive"` у analyst.write_issue() — см.
++    src/llm_json.py (седьмой пункт) и src/analyst.py. Отборщик
++    (src/selector.py) этот механизм не использует и не должен: там
++    thinking остаётся всегда disabled, вопрос паритета с продом там не
++    стоит.
++  - Вслепую: три черновика сохраняются под метками A/B/C в случайном
++    порядке; файл для автора (ab_test_output/for_author_<дата>.md) не
++    содержит названий моделей. Соответствие буква<->модель + usage +
++    стоимость по факту — в отдельном файле
++    (ab_test_output/technical_<дата>.json), который автору до момента
++    выбора показывать не нужно.
++
++Критерии выбора (менеджер, 26.09.2026, п.4) — это решение человека, СКРИПТ
++их не применяет автоматически: точность (по фактчекеру) → понятность и
++хук → реальность связей между сюжетами → при примерном равенстве —
++самая дешёвая модель (см. technical_<дата>.json, total_cost_usd_estimate
++по факту, а не по прайс-листу вслепую).
++
++Запуск:
++  python3 scripts/ab_test_analyst.py
++  python3 scripts/ab_test_analyst.py --hours=24
++  python3 scripts/ab_test_analyst.py --force-reselect
++  python3 scripts/ab_test_analyst.py --input ab_test_output/selector_frozen_2026-09-27.json
++
++Собирать архив (Сборщик) этот скрипт сам не запускает — сделайте это
++заранее (scripts/dry_run_v2.py или отдельный вызов src.collector.run()),
++как и раньше. ANTHROPIC_API_KEY обязателен — все вызовы реальные, как в
++scripts/dry_run_v2.py, мока здесь нет.
++"""
++
++import argparse
++import json
++import logging
++import os
++import random
++import sys
++from datetime import datetime, timezone
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from src import archive, config, factchecker, analyst, selector, telegram_render
++
++logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
++logger = logging.getLogger("ab_test_analyst")
++
++OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ab_test_output")
++
++# Цены за 1M токенов вход/выход (платформа, 09.2026) — см.
++# claude/format-v2-analytical-brief.md, раздел «Модель аналитика».
++# Меняются только здесь, если менеджер обновит прайс до воскресенья.
++PRICING_PER_1M = {
++    "claude-sonnet-5": (2.0, 10.0),
++    "claude-opus-5-5": (4.0, 20.0),
++    "claude-fable-5-1": (10.0, 50.0),
++}
++
++# Три участника A/B. effort ОДИНАКОВЫЙ (medium) у всех трёх — поправка
++# менеджера 26.09.2026, см. docstring модуля выше. thinking_override —
++# только у Sonnet 5 (паритет с продом); у Opus 5.5/Fable 5.1 не нужен —
++# для них llm_json._thinking_config() и так безусловно возвращает
++# "adaptive" (thinking у них нельзя выключить в принципе).
++PARTICIPANTS = [
++    {"label": "sonnet-5", "model": "claude-sonnet-5", "effort": "medium", "thinking_override": "adaptive"},
++    {"label": "opus-5.5", "model": "claude-opus-5-5", "effort": "medium", "thinking_override": None},
++    {"label": "fable-5.1", "model": "claude-fable-5-1", "effort": "medium", "thinking_override": None},
++]
++
++# Фактчекер — один и тот же для всех трёх черновиков (см. бриф: Фактчекер
++# сам в сравнении не участвует и навсегда остаётся на Opus 5.5,
++# независимо от результата A/B Аналитика).
++FACTCHECKER_MODEL = "claude-opus-5-5"
++
++
++def _cost_usd(model: str, input_tokens, output_tokens):
++    """Возвращает оценку стоимости в USD по факту реальных
++    input_tokens/output_tokens (не по видимому тексту ответа — thinking-
++    токены уже включены в output_tokens, см. src/llm_json.py про то, что
++    Anthropic API не отдаёт их отдельным полем), либо None, если usage
++    недоступен ("?" из _log_usage при отсутствующем response.usage) или
++    модель не из PRICING_PER_1M."""
++    if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
++        return None
++    pricing = PRICING_PER_1M.get(model)
++    if pricing is None:
++        return None
++    price_in, price_out = pricing
++    return round(input_tokens / 1_000_000 * price_in + output_tokens / 1_000_000 * price_out, 4)
++
++
++def _freeze_selector_output(hours: int) -> dict:
++    """Один реальный вызов Отборщика. Замораживает ровно то подмножество
++    заметок, которое реально используется отобранными сюжетами (не весь
++    архив за окно) — этого достаточно и Аналитику (notes_by_id для его
++    stories), и позже Фактчекеру (source_ids каждого черновика — всегда
++    подмножество того же множества). Смысл замораживания в файл, а не
++    просто в памяти процесса: вход должен быть идентичным byte-в-byte
++    для всех трёх Аналитиков независимо от того, что происходит с
++    архивом ПОСЛЕ этого момента (Сборщик может параллельно дописывать
++    новые заметки — A/B не должен от этого зависеть)."""
++    all_cards = archive.load_cards_since(hours)
++    notes_by_id = {c["id"]: c for c in all_cards}
++    candidate_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
++    logger.info(
++        "Заметок за %sч: %s всего, %s с importance >= %s",
++        hours, len(all_cards), len(candidate_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
++    )
++    last_titles = archive.load_last_issue_titles(config.V2_SELECTOR_LOOKBACK_ISSUES)
++
++    selection = selector.select_stories(candidate_notes, last_titles)
++    if selection is None:
++        raise RuntimeError("Отборщик не вернул результат — A/B тест не может начаться")
++
++    selected_ids = set(selection.get("selected_story_ids", []))
++    stories = [s for s in selection.get("stories", []) if s["story_id"] in selected_ids]
++    if not stories:
++        raise RuntimeError("Отборщик не выбрал ни одного сюжета в этом окне — A/B тесту нечего сравнивать")
++
++    used_note_ids = set()
++    for s in stories:
++        used_note_ids.update(s.get("note_ids", []))
++    frozen_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
++
++    return {
++        "frozen_at": datetime.now(timezone.utc).isoformat(),
++        "hours_window": hours,
++        "selection": selection,
++        "stories": stories,
++        "notes_by_id": frozen_notes,
++        "last_titles": last_titles,
++    }
++
++
++def _run_one_participant(participant: dict, stories, notes_by_id, last_titles, usage_log: list) -> dict:
++    """Один Аналитик (модель/effort/thinking_override — из participant) +
++    один Фактчекер (всегда FACTCHECKER_MODEL) на замороженном входе."""
++    label = participant["label"]
++
++    def _on_analyst_usage(info):
++        info = dict(info)
++        info["stage"] = "analyst"
++        info["participant"] = label
++        info["cost_usd"] = _cost_usd(info["model"], info["input_tokens"], info["output_tokens"])
++        usage_log.append(info)
++
++    draft = analyst.write_issue(
++        stories, notes_by_id,
++        model=participant["model"],
++        effort=participant["effort"],
++        thinking_override=participant["thinking_override"],
++        on_usage=_on_analyst_usage,
++    )
++    if draft is None:
++        return {"label": label, "participant": participant, "draft": None, "error": "Аналитик не вернул результат"}
++
++    used_note_ids = set(draft.get("watch_next_source_ids", []))
++    for block in draft.get("blocks", []):
++        used_note_ids.update(block.get("source_ids", []))
++    factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
++
++    def _on_factcheck_usage(info):
++        info = dict(info)
++        info["stage"] = "factchecker"
++        info["participant"] = label
++        info["cost_usd"] = _cost_usd(info["model"], info["input_tokens"], info["output_tokens"])
++        usage_log.append(info)
++
++    factcheck = factchecker.check_issue(
++        draft, factcheck_notes, last_titles,
++        model=FACTCHECKER_MODEL,
++        on_usage=_on_factcheck_usage,
++    )
++    if factcheck is None:
++        return {
++            "label": label, "participant": participant, "draft": draft,
++            "factcheck": None, "error": "Фактчекер не вернул результат — черновик не проверен",
++        }
++
++    final_draft = factcheck.get("corrected_draft", draft)
++    rendered = telegram_render.render_issue_html(final_draft)
++    is_valid, html_errors = telegram_render.validate_telegram_html(rendered)
++
++    return {
++        "label": label,
++        "participant": participant,
++        "draft": draft,
++        "factcheck": factcheck,
++        "rendered": rendered,
++        "html_valid": is_valid,
++        "html_errors": html_errors,
++        "error": None,
++    }
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--hours", type=int, default=12, help="окно заметок для Отборщика (по умолчанию 12ч)")
++    parser.add_argument(
++        "--force-reselect", action="store_true",
++        help="вызвать Отборщик заново, даже если на сегодня уже есть замороженный файл",
++    )
++    parser.add_argument("--input", help="явный путь к уже замороженному файлу входа (пропускает Отборщик)")
++    args = parser.parse_args()
++
++    if not config.ANTHROPIC_API_KEY:
++        logger.error("ANTHROPIC_API_KEY не задан — без него ни одна из трёх моделей Аналитика не вызовется")
++        return 1
++
++    os.makedirs(OUTPUT_DIR, exist_ok=True)
++    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
++    frozen_path = args.input or os.path.join(OUTPUT_DIR, f"selector_frozen_{today}.json")
++
++    if args.input:
++        logger.info("=== Вход явно указан: %s (Отборщик не вызывается) ===", args.input)
++        with open(args.input, "r", encoding="utf-8") as f:
++            frozen = json.load(f)
++    elif os.path.exists(frozen_path) and not args.force_reselect:
++        logger.info(
++            "=== Найден замороженный вход за сегодня (%s) — Отборщик НЕ вызывается повторно "
++            "(--force-reselect, если это осознанно нужно) ===", frozen_path,
++        )
++        with open(frozen_path, "r", encoding="utf-8") as f:
++            frozen = json.load(f)
++    else:
++        logger.info("=== Шаг 1: Отборщик (один раз за весь A/B-тест) ===")
++        frozen = _freeze_selector_output(args.hours)
++        with open(frozen_path, "w", encoding="utf-8") as f:
++            json.dump(frozen, f, ensure_ascii=False, indent=2)
++        logger.info("Вход заморожен в %s — все три Аналитика получат его как есть", frozen_path)
++
++    stories = frozen["stories"]
++    notes_by_id = frozen["notes_by_id"]
++    last_titles = frozen["last_titles"]
++    logger.info("Сюжетов на входе у всех трёх Аналитиков: %s", len(stories))
++
++    usage_log: list[dict] = []
++    results = []
++    for participant in PARTICIPANTS:
++        logger.info(
++            "=== Аналитик: %s (effort=%s, thinking_override=%s) ===",
++            participant["model"], participant["effort"], participant["thinking_override"],
++        )
++        result = _run_one_participant(participant, stories, notes_by_id, last_titles, usage_log)
++        results.append(result)
++        if result.get("error"):
++            logger.error(
++                "%s: %s — этот участник A/B пропущен в итоговом сравнении",
++                participant["label"], result["error"],
++            )
++
++    usable = [r for r in results if r.get("rendered") is not None]
++    if len(usable) < 2:
++        logger.error("Меньше двух участников дошли до готового черновика — сравнивать нечего, см. ошибки выше")
++        return 1
++
++    # --- Вслепую: случайная буква на каждого участника -----------------------
++    letters = ["A", "B", "C"][: len(usable)]
++    random.shuffle(letters)
++    for r, letter in zip(usable, letters):
++        r["letter"] = letter
++    usable.sort(key=lambda r: r["letter"])
++
++    # --- Файл для автора: три черновика, без названий моделей ----------------
++    for_author_path = os.path.join(OUTPUT_DIR, f"for_author_{today}.md")
++    lines = [
++        f"# A/B-тест Аналитика — черновики для чтения вслепую ({today})",
++        "",
++        "Критерии выбора (по порядку, решение автора — не автоматически): "
++        "точность (см. фактчекер по каждому варианту ниже) → понятность и "
++        "хук → реальность связей между сюжетами. При примерном равенстве по "
++        "всем трём — решает стоимость (не в этом файле — см. технический "
++        "файл ПОСЛЕ того, как выбор сделан).",
++        "",
++    ]
++    for r in usable:
++        fc = r["factcheck"]
++        blocked, reason = factchecker.should_block(fc)
++        lines.append(f"## Вариант {r['letter']}")
++        lines.append("")
++        lines.append(
++            "**Фактчекер:** "
++            f"unsupported_count={fc.get('unsupported_count', '?')}, "
++            f"any_number_distorted={fc.get('any_number_distorted', '?')}, "
++            f"hook_unsupported={fc.get('hook_unsupported', '?')}"
++        )
++        if blocked:
++            lines.append(f"**Публикация была бы заблокирована фактчеком:** {reason}")
++        if not r["html_valid"]:
++            lines.append(f"**Внимание:** HTML-разметка невалидна для Telegram: {'; '.join(r['html_errors'])}")
++        lines.append("")
++        lines.append("```")
++        lines.append(r["rendered"])
++        lines.append("```")
++        lines.append("")
++    with open(for_author_path, "w", encoding="utf-8") as f:
++        f.write("\n".join(lines))
++    logger.info("Файл для автора (вслепую, без названий моделей): %s", for_author_path)
++
++    # --- Технический файл: буква<->модель + usage + стоимость ----------------
++    technical_path = os.path.join(OUTPUT_DIR, f"technical_{today}.json")
++    mapping = {
++        r["letter"]: {
++            "model": r["participant"]["model"],
++            "effort": r["participant"]["effort"],
++            "thinking_override": r["participant"]["thinking_override"],
++        }
++        for r in usable
++    }
++    total_cost = sum(u["cost_usd"] for u in usage_log if u.get("cost_usd") is not None)
++    technical = {
++        "generated_at": datetime.now(timezone.utc).isoformat(),
++        "selector_input_file": frozen_path,
++        "letter_to_model_mapping": mapping,
++        "usage_by_call": usage_log,
++        "total_cost_usd_estimate": round(total_cost, 4),
++        "cost_caveat": (
++            "Оценка по официальным ценам за 1M токенов (см. PRICING_PER_1M в "
++            "этом скрипте) и реальным input_tokens/output_tokens из API. "
++            "thinking-токены НЕ выделяются Anthropic API отдельным полем — "
++            "они уже включены в output_tokens без разбивки, поэтому эта "
++            "стоимость реальная (не только по видимому тексту ответа), но "
++            "не отделяет explicitly, сколько из неё ушло на thinking."
++        ),
++        "errors": [
++            {"label": r["label"], "model": r["participant"]["model"], "error": r["error"]}
++            for r in results if r.get("error")
++        ],
++    }
++    with open(technical_path, "w", encoding="utf-8") as f:
++        json.dump(technical, f, ensure_ascii=False, indent=2)
++    logger.info(
++        "Технический файл (соответствие буква<->модель, usage, стоимость — "
++        "автору НЕ показывать до выбора): %s", technical_path,
++    )
++    logger.info("Общая стоимость A/B-теста по факту (все успешные вызовы): $%.4f", total_cost)
++
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/analyst.py b/src/analyst.py
+index e9e2542..cd893df 100644
+--- a/src/analyst.py
++++ b/src/analyst.py
+@@ -146,13 +146,36 @@ def write_issue(
+     notes_by_id: dict,
+     history_summary: str = "",
+     related_notes: list[str] | None = None,
++    model: str | None = None,
++    effort: str | None = None,
++    thinking_override: str | None = None,
++    on_usage=None,
+ ) -> dict | None:
+     """stories — отобранные Отборщиком сюжеты (selected_story_ids из его
+     ответа, уже отфильтрованные вызывающим кодом). notes_by_id — {note_id:
+     заметка Экстрактора} для всех note_ids, встречающихся в stories.
+     history_summary/related_notes — см. docstring модуля про текущий
+     ограниченный скоуп (оба опциональны). Возвращает JSON-черновик выпуска
+-    или None при неустранимой ошибке."""
++    или None при неустранимой ошибке.
++
++    26.09.2026, вечер — четыре новых необязательных параметра для
++    `scripts/ab_test_analyst.py` (воскресный A/B, три модели), ни один не
++    меняет поведение обычного вызова (dry_run_v2.py и т.п.), если не
++    передан:
++    - `model`/`effort` — переопределяют `config.MODEL_ANALYST`/
++      `MODEL_ANALYST_EFFORT`. Нужно именно так, а не через переменные
++      окружения: `config.py` читает `os.environ` один раз при импорте, а
++      A/B-скрипт перебирает три разные модели за один процесс.
++    - `thinking_override` — передаётся в `llm_json.call_json_role()` как
++      есть (см. его докстринг). Единственное применение сегодня: Sonnet 5
++      в A/B тестируется с `"adaptive"`, а не с дефолтным для него
++      `"disabled"` — паритет с тем, как он реально работал бы в проде,
++      если выиграет тест (поправка менеджера 26.09.2026). Отборщик
++      (`selector.py`) этот параметр не получает и не должен — там
++      thinking остаётся всегда `disabled`, вопрос паритета с продом там не
++      стоит.
++    - `on_usage` — см. `llm_json.call_json_role()`, тот же callback,
++      прокинут без изменений."""
+     if not stories:
+         logger.info("Аналитик: нет отобранных сюжетов, пропускаем вызов")
+         return None
+@@ -187,11 +210,16 @@ def write_issue(
+     # тот же max_tokens (см. src/llm_json.py, шестой пункт), а effort ниже
+     # это не гарантирует полностью — лучше запас, чем повторный сбой по
+     # тому же классу проблемы, что и обрыв на кириллице.
++    use_model = model or config.MODEL_ANALYST
++    use_effort = effort if effort is not None else config.MODEL_ANALYST_EFFORT
++
+     data = call_json_role(
+-        client, config.MODEL_ANALYST, SYSTEM_PROMPT, user_content,
++        client, use_model, SYSTEM_PROMPT, user_content,
+         max_tokens_attempts=[3500, 7000, 14000],
+         role_name="Аналитик",
+-        effort=config.MODEL_ANALYST_EFFORT,
++        effort=use_effort,
++        thinking_override=thinking_override,
++        on_usage=on_usage,
+     )
+     if data is None:
+         return None
+diff --git a/src/factchecker.py b/src/factchecker.py
+index 1db9449..f41b691 100644
+--- a/src/factchecker.py
++++ b/src/factchecker.py
+@@ -125,7 +125,13 @@ def _format_sources(notes_by_id: dict) -> str:
+     return "\n".join(lines)
+ 
+ 
+-def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | None = None) -> dict | None:
++def check_issue(
++    draft: dict,
++    notes_by_id: dict,
++    last_issue_titles: list[str] | None = None,
++    model: str | None = None,
++    on_usage=None,
++) -> dict | None:
+     """draft — черновик Аналитика (hook/hook_block_refs/blocks/watch_next/
+     watch_next_source_ids). notes_by_id — все заметки, соответствующие
+     source_id, встречающимся в draft (то же множество, что видел Аналитик —
+@@ -139,7 +145,16 @@ def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | N
+     (сбой самой проверки — не то же самое, что "проверка прошла успешно",
+     см. main.py-конвенцию v1 про confirm_same_event с обратным умолчанием
+     там, где ошибка проверки не должна ошибочно ОТКРЫВАТЬ дорогу к
+-    публикации, а не блокировать её)."""
++    публикации, а не блокировать её).
++
++    26.09.2026, вечер — `model`/`on_usage`: то же самое по смыслу, что у
++    `analyst.write_issue()` (см. его докстринг), нужно
++    `scripts/ab_test_analyst.py`. В A/B Фактчекер должен оставаться на
++    ОДНОЙ и той же модели (Opus 5.5, effort=medium, дефолт из config —
++    Фактчекер сам в сравнении не участвует, см. бриф) для всех трёх
++    черновиков — `model` позволяет это явно зафиксировать в вызывающем
++    коде теста, не полагаясь на текущее значение переменной окружения
++    `V2_MODEL_FACTCHECKER` в момент запуска."""
+     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=90.0)
+ 
+     lookback_block = (
+@@ -162,11 +177,14 @@ def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | N
+     # роль по брифу навсегда остаётся на Opus 5.5 (обязательный thinking),
+     # независимо от исхода воскресного A/B — запас нужен уже сейчас, не
+     # только на время теста.
++    use_model = model or config.MODEL_FACTCHECKER
++
+     data = call_json_role(
+-        client, config.MODEL_FACTCHECKER, SYSTEM_PROMPT, user_content,
++        client, use_model, SYSTEM_PROMPT, user_content,
+         max_tokens_attempts=[4500, 9000, 18000],
+         role_name="Фактчекер",
+         effort=config.MODEL_FACTCHECKER_EFFORT,
++        on_usage=on_usage,
+     )
+     if data is None:
+         return None
+diff --git a/src/llm_json.py b/src/llm_json.py
+index ab16923..05a7d18 100644
+--- a/src/llm_json.py
++++ b/src/llm_json.py
+@@ -183,7 +183,41 @@ Usage-объект только из `input_tokens`/`output_tokens`, thinking-т
+ включены в `output_tokens` без отдельного поля) — поэтому лог даёт только
+ эти две цифры плюс (когда есть блок типа `thinking`) грубую оценку по
+ длине его текста в символах, явно помеченную как оценка, а не точный
+-токен-счёт."""
++токен-счёт.
++
++**Правка менеджера от 26.09.2026, вечер, к самому этому фиксу (до начала
++воскресного A/B — снова превентивно, не по факту сбоя)**: effort у всех
++трёх участников теста должен быть ОДИНАКОВЫМ (medium) — включая Sonnet 5,
++а не "дефолт effort каждой модели" (это была моя ошибка в более раннем
++черновике сообщения автору: предлагал menять effort Fable 5.1 на его
++дефолт "high", что делает сравнение НЕЧЕСТНЫМ ровно по той причине, из-за
++которой весь этот механизм появился). Отдельно — паритет по thinking:
++Sonnet 5 в роли Аналитика должен участвовать в A/B тоже с `adaptive`
++thinking (не `disabled`), потому что именно так он будет реально работать
++в проде, если выиграет тест — тестировать его с `disabled` означало бы
++сравнивать не то, что реально пойдёт в продакшен. Жёсткая привязка
++`_thinking_config()` по модели (Sonnet 5 → всегда `disabled`) для ролей
++Отборщика и обычных (не A/B) вызовов Аналитика остаётся правильной — там
++thinking и в самом деле не нужен и вреден (см. четвёртый и пятый сбои
++выше). Поэтому это НЕ смена дефолта модели, а точечный override только
++для сценария A/B: новый необязательный параметр `thinking_override`
++у `call_json_role()` ниже (и, соответственно, у `analyst.write_issue()`) —
++когда передан, полностью замещает результат `_thinking_config(model)` для
++этого конкретного вызова. `selector.py` (Отборщик) этот параметр не
++принимает и не передаёт — там вопрос паритета с продом не стоит вообще
++(Отборщик всегда работает на Sonnet 5, и в A/B не участвует), так что
++поведение Отборщика этой правкой не затронуто ни при каких условиях.
++
++Также по просьбе менеджера логирование usage теперь возвращает те же
++данные вызывающему коду (`_log_usage()` возвращает dict, не только
++пишет в лог) — нужно `scripts/ab_test_analyst.py` (седьмой пункт, тот же
++день): считать ФАКТИЧЕСКУЮ стоимость каждого из шести вызовов A/B-теста
++(3 черновика Аналитика + 3 прогона Фактчекера) по реальным
++input_tokens/output_tokens, а не только смотреть числа в логе глазами.
++Новый необязательный параметр `on_usage` у `call_json_role()` — callback,
++получающий этот dict после каждого успешного вызова; `None` по умолчанию
++(текущее поведение всех существующих вызовов не меняется, см.
++регресс-тест)."""
+ 
+ import json
+ import logging
+@@ -219,7 +253,7 @@ def _thinking_config(model: str) -> dict:
+     return {"type": "disabled"}
+ 
+ 
+-def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> None:
++def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> dict:
+     """Логирует input_tokens/output_tokens по факту успешного вызова — по
+     прямой просьбе менеджера проекта (26.09.2026, вечер): "пересчитаем
+     бюджет по первым реальным выпускам". Честная оговорка (см. docstring
+@@ -227,7 +261,14 @@ def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> None:
+     output_tokens включает их без разбивки. Когда в ответе есть блок типа
+     "thinking", дополнительно логируется грубая ОЦЕНКА его размера по
+     числу символов (не токенов) — только чтобы было видно порядок
+-    величины, не точная цифра."""
++    величины, не точная цифра.
++
++    26.09.2026, вечер (тем же днём, седьмой пункт) — дополнительно
++    возвращает те же данные как dict (раньше функция ничего не
++    возвращала — вызывающий код игнорировал результат). Нужно
++    `scripts/ab_test_analyst.py` через параметр `on_usage` у
++    `call_json_role()` ниже: считать факт-стоимость каждого прогона A/B
++    по реальным числам, не разбором текста лога."""
+     usage = getattr(response, "usage", None)
+     input_tokens = getattr(usage, "input_tokens", "?") if usage is not None else "?"
+     output_tokens = getattr(usage, "output_tokens", "?") if usage is not None else "?"
+@@ -242,6 +283,13 @@ def _log_usage(role_name: str, model: str, response, log_ctx: str = "") -> None:
+         "%s%s: usage модели=%s вход=%s выход=%s%s",
+         role_name, ctx, model, input_tokens, output_tokens, thinking_note,
+     )
++    return {
++        "role": role_name,
++        "model": model,
++        "input_tokens": input_tokens,
++        "output_tokens": output_tokens,
++        "thinking_chars": thinking_chars,
++    }
+ 
+ 
+ def _request_timeout(max_tokens: int) -> float:
+@@ -293,6 +341,8 @@ def call_json_role(
+     role_name: str,
+     log_ctx: str = "",
+     effort: str | None = None,
++    thinking_override: str | None = None,
++    on_usage=None,
+ ) -> dict | None:
+     """Вызывает модель с указанным промптом, разбирает JSON-ответ (терпимо —
+     через `raw_decode`, игнорируя текст после первого валидного объекта).
+@@ -310,6 +360,23 @@ def call_json_role(
+     таком случае просто не передавайте его — None по умолчанию, ничего в
+     запрос не добавляется).
+ 
++    `thinking_override` — необязателен, по умолчанию `None` (поведение не
++    меняется: thinking определяется `_thinking_config(model)`, как и
++    раньше). Когда передан ("adaptive" или "disabled"), полностью
++    замещает результат `_thinking_config(model)` для ЭТОГО вызова — см.
++    docstring модуля, седьмой пункт: единственное сегодняшнее применение —
++    `scripts/ab_test_analyst.py` заставляет Sonnet 5 в роли Аналитика
++    работать с `"adaptive"` вместо дефолтного для него `"disabled"`, для
++    паритета с тем, как он будет реально работать в проде, если выиграет
++    A/B. Не предполагается для обычных (не тестовых) вызовов ролей.
++
++    `on_usage` — необязательный callback, принимающий один аргумент (dict
++    от `_log_usage()`: role/model/input_tokens/output_tokens/
++    thinking_chars) — вызывается после каждого УСПЕШНОГО вызова модели.
++    `None` по умолчанию — ничего не меняется для существующих вызывающих.
++    Нужен `scripts/ab_test_analyst.py` для подсчёта факт-стоимости каждого
++    прогона A/B.
++
+     Не проверяет обязательные ключи схемы — это ответственность вызывающего
+     кода конкретной роли (у каждой роли свой набор обязательных ключей)."""
+     for attempt, max_tokens in enumerate(max_tokens_attempts, start=1):
+@@ -325,7 +392,12 @@ def call_json_role(
+             # anthropic==0.40.0 таких параметров в сигнатуре create() ещё
+             # нет, именованный аргумент упал бы с TypeError раньше любого
+             # сетевого запроса (проверено на thinking= в этой же сессии).
+-            extra_body = {"thinking": _thinking_config(model)}
++            extra_body = {
++                "thinking": (
++                    {"type": thinking_override} if thinking_override is not None
++                    else _thinking_config(model)
++                )
++            }
+             if effort is not None:
+                 extra_body["output_config"] = {"effort": effort}
+ 
+@@ -343,7 +415,9 @@ def call_json_role(
+             raw = strip_json_fences(raw)
+             raw = _skip_leading_prose(raw)
+             data, _ = json.JSONDecoder().raw_decode(raw)
+-            _log_usage(role_name, model, response, log_ctx)
++            usage_info = _log_usage(role_name, model, response, log_ctx)
++            if on_usage is not None:
++                on_usage(usage_info)
+             return data
+ 
+         except (json.JSONDecodeError, ValueError) as exc:
