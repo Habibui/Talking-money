@@ -1,0 +1,201 @@
+"""
+Фактчекер (v2, роль 4) — отдельный вызов, НЕ видит промпт/логику Аналитика,
+только сам черновик и первоисточники. Проверяет каждое поле черновика,
+возвращает по каждому утверждению supported/interpretation/unsupported +
+corrected_draft + флаги блокировки публикации. Промпт закреплён после двух
+раундов ревью — см. claude/format-v2-prompts-draft.md (третья версия,
+раздел 4).
+
+Правило блокировки публикации (по документу — реализуется в коде, не в
+промпте) вынесено отдельной функцией should_block() ниже, чтобы main-код
+v2 (пока — scripts/dry_run_v2.py) явно вызывал именно её, а не
+переизобретал условие каждый раз."""
+
+import json
+import logging
+
+import anthropic
+
+from . import config
+
+logger = logging.getLogger(__name__)
+
+
+SYSTEM_PROMPT = """\
+Ты — независимый факт-чекер аналитического Telegram-канала «О чём
+talk'уют деньги». Тебе неизвестно, как именно был написан черновик ниже —
+ты видишь только сам черновик и первоисточники. Проверь каждое
+фактическое утверждение в ЛЮБОМ поле черновика (hook, title и what каждого
+блока, meaning, link, watch_next) против первоисточников, независимо от
+того, насколько складно и уверенно оно звучит.
+
+Особое внимание к hook и к заголовкам блоков (title): это самые заметные
+части выпуска (hook читатель видит в уведомлении, title — пробегая выпуск
+глазами), и именно там модель, писавшая черновик, сильнее всего склонна
+преувеличивать или обобщать сверх того, что реально подтверждено фактами.
+Проверяй hook и title так же строго, как "what" — любое утверждение в них,
+не подтверждённое фактами из blocks (для hook — через `hook_block_refs`)
+или источников, это unsupported. Для hook это дополнительно блокирует
+публикацию НЕЗАВИСИМО от общего unsupported_count (см. правило блокировки
+ниже) — для title такого отдельного жёсткого правила нет, но оно всё равно
+считается в общем unsupported_count.
+
+Для КАЖДОГО фактического утверждения в КАЖДОМ поле определи одну из трёх
+меток:
+- supported — прямо подтверждается текстом источника (по указанному
+  source_id или по любому другому источнику в предоставленном наборе).
+- interpretation — это не факт, а вывод/связь/оценка (даже если по смыслу
+  верно) — должно быть явно сформулировано как мнение, а не как
+  установленный факт.
+- unsupported — утверждение не находит подтверждения ни в одном источнике
+  из набора, либо цифра/дата/сумма не совпадает с тем, что в источнике.
+
+Особое внимание к пяти паттернам, которые легко проскакивают именно у
+большой модели, пишущей уверенно и складно:
+1. Причинно-следственная связь ("X вызвало Y"), которой явно нет ни в
+   одном источнике — это как минимум interpretation, а не факт.
+2. "Рынок отреагировал ростом/падением" или похожая формулировка без
+   опоры на конкретную цифру (индекс, курс, доходность) из источника —
+   unsupported, если цифры нет.
+3. Слова, усиливающие масштаб ("обвал", "рекордный", "беспрецедентный",
+   "резкий"), не подкреплённые сопоставимой формулировкой или цифрой в
+   источнике — unsupported или требуют смягчения.
+4. Связка с прошлым выпуском ("мы уже писали, что...", поле "link") —
+   перепроверяй по факту, что в упомянутом прошлом выпуске (он есть в
+   контексте) ДЕЙСТВИТЕЛЬНО был именно этот тезис, а не то, что черновик
+   ему задним числом приписывает.
+5. Модальность и статус события: "рассматривает"/"предлагает"/
+   "ожидается"/"прогноз" в источнике превращённое черновиком в
+   "решил"/"принял"/"произошло" — самая частая ошибка при переводе с
+   английского, отмечай как unsupported (факт события не подтверждён,
+   подтверждено только обсуждение/ожидание). Сюда же — перепутанная
+   атрибуция: кто именно сказал или спрогнозировал (аналитик банка,
+   должностное лицо регулятора, анонимный источник) — если черновик
+   приписывает слова не тому, кто их сказал в источнике, это unsupported.
+
+Отдельно для каждого числового значения в ЛЮБОМ поле черновика (цифры,
+проценты, суммы, даты) сверь его с источником и отметь
+number_distorted: true, если оно не совпадает или искажено (округлено в
+сторону, потерян знак, перепутан период, ИЛИ неверно переведена единица —
+billion/trillion, bps, валюта пересчитана вместо того, чтобы остаться как
+в источнике, потеряна/добавлена десятичная запятая).
+
+Верни JSON:
+{
+  "claims": [
+    {
+      "field": "hook" | "title" | "what" | "meaning" | "link" | "watch_next",
+      "block_index": 0 | null,   // null для hook и watch_next — они не
+                                 // привязаны к одному блоку напрямую
+      "text": "...",
+      "verdict": "supported" | "interpretation" | "unsupported",
+      "number_distorted": true | false,
+      "note": "..."   // что не так, если verdict не supported
+    }, ...
+  ],
+  "corrected_draft": { ... },  // тот же формат черновика, с точечными
+                                // правками (interpretation переформулирован
+                                // явно как мнение, unsupported смягчено или
+                                // убрано)
+  "unsupported_count": N,          // по ВСЕМ полям, не только what
+  "any_number_distorted": true | false,   // по ВСЕМ полям
+  "hook_unsupported": true | false        // отдельный флаг: есть ли хотя
+                                           // бы одно unsupported именно в hook
+}
+
+Ты сверяешь ТОЛЬКО с предоставленными заметками/текстами — у тебя нет
+доступа к вебу, не проверяй факты против общих знаний модели, только
+против того, что реально было в источниках этого выпуска."""
+
+_REQUIRED_KEYS = {
+    "claims", "corrected_draft", "unsupported_count",
+    "any_number_distorted", "hook_unsupported",
+}
+
+
+def _format_sources(notes_by_id: dict) -> str:
+    lines = []
+    for note_id, note in notes_by_id.items():
+        lines.append(
+            f"- source_id={note_id} | источник={note['source']} | ссылка={note['link']} "
+            f"| глубина={note['content_level']}\n"
+            f"  факты: {' '.join(note.get('key_facts', []))}"
+        )
+    return "\n".join(lines)
+
+
+def check_issue(draft: dict, notes_by_id: dict, last_issue_titles: list[str] | None = None) -> dict | None:
+    """draft — черновик Аналитика (hook/hook_block_refs/blocks/watch_next/
+    watch_next_source_ids). notes_by_id — все заметки, соответствующие
+    source_id, встречающимся в draft (то же множество, что видел Аналитик —
+    Фактчекер видит первоисточники, не сам вызов Аналитика). last_issue_titles
+    — для проверки паттерна 4 (связка "мы уже писали, что...") — опционально,
+    если отсутствует, явно говорим модели, что прошлых выпусков в контексте
+    нет (см. analyst.py — тот же принцип не оставлять это неявным).
+
+    Возвращает JSON-ответ Фактчекера, либо None при неустранимой ошибке —
+    вызывающий код в этом случае НЕ должен публиковать выпуск автоматически
+    (сбой самой проверки — не то же самое, что "проверка прошла успешно",
+    см. main.py-конвенцию v1 про confirm_same_event с обратным умолчанием
+    там, где ошибка проверки не должна ошибочно ОТКРЫВАТЬ дорогу к
+    публикации, а не блокировать её)."""
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=90.0)
+
+    lookback_block = (
+        "\n".join(f"- {t}" for t in last_issue_titles) if last_issue_titles
+        else "(прошлые выпуски в этом запуске не переданы)"
+    )
+
+    user_content = (
+        f"Черновик выпуска (JSON):\n{json.dumps(draft, ensure_ascii=False, indent=2)}\n\n"
+        f"Первоисточники (заметки по source_id):\n{_format_sources(notes_by_id)}\n\n"
+        f"Заголовки сюжетов прошлых выпусков (для паттерна 4):\n{lookback_block}\n"
+    )
+
+    try:
+        response = client.messages.create(
+            model=config.MODEL_FACTCHECKER,
+            max_tokens=4000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        raw = "".join(
+            block.text for block in response.content if getattr(block, "type", "") == "text"
+        ).strip()
+
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+
+        data, _ = json.JSONDecoder().raw_decode(raw)
+        missing = _REQUIRED_KEYS - set(data.keys())
+        if missing:
+            raise ValueError(f"В ответе Фактчекера нет ключей: {missing}")
+        return data
+
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.error("Сбой формата ответа Фактчекера: %s", exc)
+        return None
+    except Exception as exc:
+        logger.error("Ошибка вызова Фактчекера: %s", exc)
+        return None
+
+
+def should_block(factcheck: dict) -> tuple[bool, str]:
+    """Правило блокировки публикации из format-v2-prompts-draft.md (раздел
+    4, «Правило блокировки публикации»): unsupported_count > 2 (по всем
+    полям) ИЛИ any_number_distorted ИЛИ hook_unsupported (независимо от
+    unsupported_count, даже если это единственная проблема). Возвращает
+    (нужно_блокировать, причина_для_лога/уведомления_автору)."""
+    reasons = []
+    if factcheck.get("unsupported_count", 0) > 2:
+        reasons.append(f"unsupported_count={factcheck['unsupported_count']} > 2")
+    if factcheck.get("any_number_distorted"):
+        reasons.append("any_number_distorted=true")
+    if factcheck.get("hook_unsupported"):
+        reasons.append("hook_unsupported=true")
+    if reasons:
+        return True, "; ".join(reasons)
+    return False, ""
