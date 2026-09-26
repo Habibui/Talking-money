@@ -130,17 +130,35 @@ def call_json_role(
         except (json.JSONDecodeError, ValueError) as exc:
             stop_reason = getattr(response, "stop_reason", "?") if response is not None else "?"
             ctx = f" ({log_ctx})" if log_ctx else ""
+            # 26.09.2026 — третий реальный сбой на этой же роли (Отборщик):
+            # "Expecting value: line 1 column 1 (char 0)" повторился даже на
+            # max_tokens=6000, и это сообщение НЕ различает два совершенно
+            # разных случая — (а) raw реально пустая строка (например, весь
+            # бюджет токенов ушёл на блок типа не "text", скажем "thinking",
+            # и до текстового блока с JSON модель просто не добралась), или
+            # (б) raw непустая, но начинается не с JSON (модель начала
+            # ответ с преамбулы/рассуждений вместо прямого "{"). Без этого
+            # лога нельзя было бы отличить одно от другого и чинить
+            # прицельно, а не гадать в третий раз — поэтому здесь логируется
+            # состав блоков ответа и превью самого текста.
+            block_types = (
+                [getattr(b, "type", "?") for b in response.content]
+                if response is not None else []
+            )
+            raw_preview = repr(raw[:200])
             if not is_last:
                 next_max = max_tokens_attempts[attempt]
                 logger.warning(
-                    "%s%s: сбой формата ответа при max_tokens=%s (stop_reason=%s) — "
-                    "похоже на обрыв по лимиту токенов, повтор с max_tokens=%s: %s",
-                    role_name, ctx, max_tokens, stop_reason, next_max, exc,
+                    "%s%s: сбой формата ответа при max_tokens=%s (stop_reason=%s, "
+                    "блоки_ответа=%s, превью=%s) — похоже на обрыв по лимиту токенов, "
+                    "повтор с max_tokens=%s: %s",
+                    role_name, ctx, max_tokens, stop_reason, block_types, raw_preview, next_max, exc,
                 )
                 continue
             logger.error(
-                "%s%s: сбой формата ответа после повтора (max_tokens=%s, stop_reason=%s): %s",
-                role_name, ctx, max_tokens, stop_reason, exc,
+                "%s%s: сбой формата ответа после повтора (max_tokens=%s, stop_reason=%s, "
+                "блоки_ответа=%s, превью=%s): %s",
+                role_name, ctx, max_tokens, stop_reason, block_types, raw_preview, exc,
             )
             return None
 
