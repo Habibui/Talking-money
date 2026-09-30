@@ -83,13 +83,22 @@ def save_digest_queue(queue: list) -> None:
         f.write("\n")
 
 
-def append_to_digest_queue(source: str, headline_ru: str, comment_ru: str, link: str) -> None:
+def append_to_digest_queue(
+    source: str, headline_ru: str, comment_ru: str, link: str, topic_tag: str | None = None,
+) -> None:
+    # topic_tag — 30.09.2026, формат дайджеста (п.3, решение автора):
+    # необязательный параметр с дефолтом None, чтобы старые вызовы (если
+    # где-то остались) не падали; рендеринг в src/telegram_bot.py сам
+    # подставляет безопасный эмодзи по умолчанию, если тега нет — сюда
+    # заходит и случай "элемент был поставлен в очередь до этого деплоя,
+    # в state/digest_queue.json у него нет этого ключа вообще".
     queue = load_digest_queue()
     queue.append({
         "source": source,
         "headline_ru": headline_ru,
         "comment_ru": comment_ru,
         "link": link,
+        "topic_tag": topic_tag,
     })
     save_digest_queue(queue)
 

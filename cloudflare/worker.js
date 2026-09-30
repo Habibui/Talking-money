@@ -24,16 +24,18 @@
  * Cloudflare Cron Triggers не понимают часовых поясов, а МСК = UTC+3
  * круглый год (без перехода на летнее время):
  *   "0 * * * *"    -> mode=collect   (почасово, в начале каждого часа)
- *   "5 5 * * *"    -> mode=issue     (05:05 UTC = 08:05 МСК)
- *   "5 16 * * *"   -> mode=issue     (16:05 UTC = 19:05 МСК)
+ *   "0 19 * * *"   -> mode=issue     (19:00 UTC = 22:00 МСК)
  *
- * Сдвиг issue-триггеров на 5 минут от часового collect — запас на всякий
- * случай (сам Worker может слегка задержаться под нагрузкой Cloudflare),
- * не жёсткое требование: mode=issue в самом пайплайне (scripts/issue_v2.py)
- * теперь САМ первым шагом гоняет Сборщик перед тем, как формировать выпуск,
- * так что корректность выпуска не зависит от того, успел ли отработать
- * соседний почасовой collect (см. комментарий в issue_v2.py и в
- * .github/workflows/publish_v2.yml).
+ * 30.09.2026 — решение автора (п.1, гибридный формат v1+v2): было два
+ * issue-триггера в день (08:05 и 19:05 МСК), стал один, в 22:00 МСК —
+ * окно выпуска теперь "с прошлого выпуска по текущий момент", а не
+ * фиксированные пол-суток. v1 при этом продолжает работать как раньше
+ * (это НЕ переход на v2-only — см. src/config.py, V1_DISABLED).
+ *
+ * mode=issue в самом пайплайне (scripts/issue_v2.py) первым шагом сам
+ * гоняет Сборщик перед тем, как формировать выпуск, так что корректность
+ * выпуска не зависит от того, успел ли отработать соседний почасовой
+ * collect (см. комментарий в issue_v2.py и в .github/workflows/publish_v2.yml).
  */
 
 const OWNER = "Habibui";
@@ -44,7 +46,7 @@ const WORKFLOW_FILE = "publish_v2.yml";
  * списком Cron Triggers в Settings -> Triggers этого Worker'а. */
 function modeForCron(cron) {
   if (cron === "0 * * * *") return "collect";
-  if (cron === "5 5 * * *" || cron === "5 16 * * *") return "issue";
+  if (cron === "0 19 * * *") return "issue";
   return null;
 }
 
@@ -81,7 +83,7 @@ export default {
   async scheduled(event, env, ctx) {
     const mode = modeForCron(event.cron);
     if (!mode) {
-      console.error(`Незнакомая cron-строка у этого срабатывания: "${event.cron}" — не знаю, какой mode дёргать. Проверь, что здесь (modeForCron) и в Settings -> Triggers указаны одни и те же три cron-строки.`);
+      console.error(`Незнакомая cron-строка у этого срабатывания: "${event.cron}" — не знаю, какой mode дёргать. Проверь, что здесь (modeForCron) и в Settings -> Triggers указаны одни и те же две cron-строки.`);
       return;
     }
     await dispatchWorkflow(mode, env);

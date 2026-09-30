@@ -341,7 +341,14 @@ def main() -> int:
                 logger.info("[DRY_RUN] Пост из %s:\n%s\n", item["source"], text)
                 ok = True
             else:
-                ok = telegram_bot.send_message(text, silent=timeutil.is_night_msk())
+                # disable_preview=True — 01.10.2026, решение автора: раньше
+                # отключали предпросмотр ссылки только в дайджесте (см.
+                # maybe_flush_digest выше), с этой правки — и у одиночных
+                # "громких" постов тоже (см. telegram_bot.send_message,
+                # docstring).
+                ok = telegram_bot.send_message(
+                    text, silent=timeutil.is_night_msk(), disable_preview=True,
+                )
 
             if ok:
                 state.mark_posted(st, [item])
@@ -371,7 +378,8 @@ def main() -> int:
         # повторно обработать заголовок (дубль в очереди не страшнее дубля
         # поста), чем молча потерять уже переведённую новость.
         state.append_to_digest_queue(
-            item["source"], translated["headline_ru"], translated["comment_ru"], item["link"]
+            item["source"], translated["headline_ru"], translated["comment_ru"], item["link"],
+            topic_tag=translated.get("topic_tag"),
         )
         recent_posts = state.append_recent_post(
             recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"]

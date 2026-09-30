@@ -136,6 +136,16 @@ def render_issue_html(issue: dict) -> str:
             parts.append(block["link"])
         parts.append("")
 
+    # 30.09.2026 — "Что это значит для нас" (п.2, решение автора):
+    # необязательное поле, см. analyst.py SYSTEM_PROMPT правило 15 — модель
+    # сама решает, писать ли его (null, если для этого выпуска нет реального
+    # сюжета с прямым следствием для России), рендер только показывает то,
+    # что пришло, не подставляет ничего своего.
+    for_us = issue.get("for_us")
+    if for_us:
+        parts.append(f"<b>Что это значит для нас:</b> {for_us}")
+        parts.append("")
+
     watch_next = issue.get("watch_next")
     if watch_next:
         parts.append(f"<b>Что смотреть дальше:</b> {watch_next}")

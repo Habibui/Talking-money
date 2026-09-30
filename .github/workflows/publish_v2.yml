@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "collect (почасовой Сборщик) или issue (выпуск, 08:00/19:00 МСК)"
+        description: "collect (почасовой Сборщик) или issue (выпуск, 22:00 МСК, с 30.09.2026 раз в сутки)"
         required: true
         default: "collect"
         type: choice
@@ -39,7 +39,7 @@ on:
           - collect
           - issue
       hours:
-        description: "окно заметок для Отборщика в часах (только mode=issue; пусто = дефолт scripts/issue_v2.py, 13ч)"
+        description: "окно заметок для Отборщика в часах (только mode=issue; пусто = дефолт scripts/issue_v2.py, 25ч)"
         required: false
         type: string
 
