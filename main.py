@@ -57,7 +57,15 @@ def maybe_flush_digest() -> None:
     флашили — отправляет накопленную очередь рутинных новостей одним
     дайджестом (если она не пуста), и в любом случае отмечает этот час как
     обработанный, чтобы не пытаться флашить повторно на каждом из нескольких
-    запусков внутри одного и того же часа."""
+    запусков внутри одного и того же часа.
+
+    03.10.2026, решение автора: дайджест теперь ВСЕГДА ровно одно сообщение
+    (см. telegram_bot.build_digest_message, докстринг — там же разбор
+    отклонённых вариантов, включая сортировку по importance с aging).
+    Новости, которые не влезли в лимит Telegram, остаются в очереди и уходят
+    со следующим флашем (с приоритетом выше, чем у свежих новостей), а не
+    отдельным "продолжением" — поэтому ниже очередь не всегда очищается
+    полностью."""
     current_hour = timeutil.hour_msk()
     flush_key = timeutil.flush_key_msk()
     is_flush_hour = current_hour in config.DIGEST_FLUSH_HOURS_MSK
@@ -75,40 +83,48 @@ def maybe_flush_digest() -> None:
         return
 
     intro_ru = llm.summarize_digest(digest_queue)
-    digest_messages = telegram_bot.build_digest_messages(digest_queue, intro_ru)
+    digest_message, leftover = telegram_bot.build_digest_message(digest_queue, intro_ru)
+    sent_count = len(digest_queue) - len(leftover)
 
     if DRY_RUN:
-        for i, msg in enumerate(digest_messages, 1):
-            logger.info("[DRY_RUN] Дайджест %d/%d:\n%s\n", i, len(digest_messages), msg)
-        state.save_digest_queue([])
+        logger.info("[DRY_RUN] Дайджест (%d из %d новостей):\n%s\n", sent_count, len(digest_queue), digest_message)
+        if leftover:
+            logger.info(
+                "[DRY_RUN] %d новостей не влезли в лимит сообщения — "
+                "остаются в очереди до следующего дайджеста (приоритет выше, "
+                "чем у свежих).", len(leftover),
+            )
+        state.save_digest_queue(leftover)
         meta["last_flush_key"] = flush_key
         state.save_digest_meta(meta)
-        logger.info("[DRY_RUN] Дайджест из %d новостей 'отправлен'.", len(digest_queue))
+        logger.info("[DRY_RUN] Дайджест 'отправлен'.")
         return
 
     silent = timeutil.is_night_msk()
-    sent_all = True
-    for msg in digest_messages:
-        # disable_preview=True — 24.09.2026, см. docstring send_message: в
-        # дайджесте несколько ссылок в одном сообщении, Telegram-превью
-        # рендерится только для первой из них и вводит в заблуждение (будто
-        # весь дайджест про одну новость).
-        if not telegram_bot.send_message(msg, silent=silent, disable_preview=True):
-            sent_all = False
-            logger.warning(
-                "Не удалось отправить часть дайджеста — очередь и час флаша "
-                "оставляем как есть, попробуем снова следующим запуском."
-            )
-            break
-        time.sleep(SEND_DELAY_SECONDS)
-
-    if sent_all:
-        state.save_digest_queue([])
+    # disable_preview=True — 24.09.2026, см. docstring send_message: в
+    # дайджесте несколько ссылок в одном сообщении, Telegram-превью
+    # рендерится только для первой из них и вводит в заблуждение (будто
+    # весь дайджест про одну новость).
+    if telegram_bot.send_message(digest_message, silent=silent, disable_preview=True):
+        state.save_digest_queue(leftover)
         meta["last_flush_key"] = flush_key
         state.save_digest_meta(meta)
-        logger.info(
-            "Дайджест отправлен: %d новостей, %d сообщени(е/я/й).",
-            len(digest_queue), len(digest_messages),
+        if leftover:
+            logger.warning(
+                "Дайджест отправлен (%d новостей), но %d наименее значимых "
+                "не влезли в одно сообщение и перенесены на следующий "
+                "дайджест (с повышенным приоритетом) — если это происходит "
+                "систематически (не в единичный 'горячий' день), см. "
+                "telegram_bot.build_digest_message, докстринг, про "
+                "возможные следующие шаги.",
+                sent_count, len(leftover),
+            )
+        else:
+            logger.info("Дайджест отправлен: %d новостей, уместились в одно сообщение.", sent_count)
+    else:
+        logger.warning(
+            "Не удалось отправить дайджест — очередь и час флаша оставляем "
+            "как есть, попробуем снова следующим запуском."
         )
 
 
@@ -341,14 +357,13 @@ def main() -> int:
                 logger.info("[DRY_RUN] Пост из %s:\n%s\n", item["source"], text)
                 ok = True
             else:
-                # disable_preview=True — 01.10.2026, решение автора: раньше
-                # отключали предпросмотр ссылки только в дайджесте (см.
-                # maybe_flush_digest выше), с этой правки — и у одиночных
-                # "громких" постов тоже (см. telegram_bot.send_message,
-                # docstring).
-                ok = telegram_bot.send_message(
-                    text, silent=timeutil.is_night_msk(), disable_preview=True,
-                )
+                # 03.10.2026, решение автора: превью ссылки у одиночных
+                # "громких" постов вернули как было (01.10.2026 было
+                # disable_preview=True и здесь тоже — см.
+                # telegram_bot.send_message, docstring, причина отключения
+                # у дайджеста сюда никогда не относилась, у одиночного поста
+                # всего одна ссылка).
+                ok = telegram_bot.send_message(text, silent=timeutil.is_night_msk())
 
             if ok:
                 state.mark_posted(st, [item])
@@ -380,6 +395,8 @@ def main() -> int:
         state.append_to_digest_queue(
             item["source"], translated["headline_ru"], translated["comment_ru"], item["link"],
             topic_tag=translated.get("topic_tag"),
+            comment_digest_ru=translated.get("comment_digest_ru"),
+            importance=translated.get("importance"),
         )
         recent_posts = state.append_recent_post(
             recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"]

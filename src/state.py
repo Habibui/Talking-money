@@ -84,7 +84,9 @@ def save_digest_queue(queue: list) -> None:
 
 
 def append_to_digest_queue(
-    source: str, headline_ru: str, comment_ru: str, link: str, topic_tag: str | None = None,
+    source: str, headline_ru: str, comment_ru: str, link: str,
+    topic_tag: str | None = None, comment_digest_ru: str | None = None,
+    importance: int | None = None,
 ) -> None:
     # topic_tag — 30.09.2026, формат дайджеста (п.3, решение автора):
     # необязательный параметр с дефолтом None, чтобы старые вызовы (если
@@ -92,6 +94,14 @@ def append_to_digest_queue(
     # подставляет безопасный эмодзи по умолчанию, если тега нет — сюда
     # заходит и случай "элемент был поставлен в очередь до этого деплоя,
     # в state/digest_queue.json у него нет этого ключа вообще".
+    # comment_digest_ru/importance — 03.10.2026 (решение автора, см. llm.py
+    # правила 4 и 12): та же логика "необязательно с дефолтом None" —
+    # src/telegram_bot.py сам подставляет comment_ru целиком и importance=3,
+    # если этих полей нет/пусто. deferred_count — НЕ параметр, всегда 0 для
+    # новой записи: это счётчик того, сколько раз новость уже откладывалась
+    # build_digest_message из-за переполнения дайджеста (см. его докстринг,
+    # механизм "aging" против голодания низкоприоритетных новостей) —
+    # увеличивается только там, никогда при первой постановке в очередь.
     queue = load_digest_queue()
     queue.append({
         "source": source,
@@ -99,6 +109,9 @@ def append_to_digest_queue(
         "comment_ru": comment_ru,
         "link": link,
         "topic_tag": topic_tag,
+        "comment_digest_ru": comment_digest_ru,
+        "importance": importance,
+        "deferred_count": 0,
     })
     save_digest_queue(queue)
 
