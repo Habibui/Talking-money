@@ -99,6 +99,20 @@ def fetch_article_lead(url: str) -> str:
     return ""
 
 
+def _entry_published_iso(entry) -> str | None:
+    """Дата публикации записи RSS в ISO-формате UTC, либо None, если фид её
+    не отдаёт/отдаёт мусор. feedparser уже приводит дату к UTC в
+    published_parsed (struct_time); updated_parsed — запасной вариант."""
+    from datetime import datetime, timezone
+    parsed = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if not parsed:
+        return None
+    try:
+        return datetime(*parsed[:6], tzinfo=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_rss(source: dict) -> list:
     """Возвращает список {source, title, summary, link} из RSS-фида."""
     items = []
@@ -122,6 +136,10 @@ def fetch_rss(source: dict) -> list:
                 "title": title,
                 "summary": summary,
                 "link": link,
+                # 03.10.2026 — дата публикации из RSS (UTC, ISO) или None.
+                # Нужна v2, чтобы не брать в выпуск четырёхдневные новости
+                # (см. config.V2_MAX_NOTE_AGE_HOURS).
+                "published_at": _entry_published_iso(entry),
                 # 24.09.2026 — см. config.py: "ru" для источников, уже
                 # написанных по-русски (ЦБ РФ, Ведомости), чтобы
                 # llm.translate_and_comment() не пыталась их "переводить".
@@ -176,12 +194,22 @@ def fetch_telegram_channel(source: dict) -> list:
         title = text if len(text) <= 120 else text[:117].rsplit(" ", 1)[0] + "…"
         summary = text
 
+        published_at = None
+        time_tag = msg.select_one("time[datetime]")
+        if time_tag:
+            try:
+                from datetime import datetime, timezone
+                published_at = datetime.fromisoformat(time_tag["datetime"]).astimezone(timezone.utc).isoformat()
+            except (ValueError, KeyError):
+                published_at = None
+
         items.append(
             {
                 "source": source["name"],
                 "title": title,
                 "summary": summary,
                 "link": link,
+                "published_at": published_at,
                 "language": source.get("language", "en"),
             }
         )

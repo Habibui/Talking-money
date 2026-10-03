@@ -136,22 +136,45 @@ def main() -> int:
     logger.info("=== Шаг 1: Отборщик ===")
     all_cards = archive.load_cards_since(args.hours)
     notes_by_id = {c["id"]: c for c in all_cards}
-    candidate_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
+    important_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
+    # 03.10.2026 — свежесть: в выпуск 03.10 попала новость 29.09 (Сборщик
+    # добрал её в архив только 02.10), а окно по extracted_at этого не видит.
+    candidate_notes, stale_notes = archive.filter_fresh(important_notes, config.V2_MAX_NOTE_AGE_HOURS)
     logger.info(
-        "Заметок за %sч: %s всего, %s с importance >= %s",
-        args.hours, len(all_cards), len(candidate_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
+        "Заметок за %sч: %s всего, %s с importance >= %s, из них устарели (старше %sч) %s, к Отборщику идут %s",
+        args.hours, len(all_cards), len(important_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
+        config.V2_MAX_NOTE_AGE_HOURS, len(stale_notes), len(candidate_notes),
     )
+    for c in stale_notes:
+        logger.info("  устарела: %s %s (%.0fч)", c.get("source"), c.get("link"), archive.note_age_hours(c))
 
     last_titles = archive.load_last_issue_titles(config.V2_SELECTOR_LOOKBACK_ISSUES)
-    selection = selector.select_stories(candidate_notes, last_titles)
+    last_context = archive.load_last_issue_summaries(config.V2_SELECTOR_LOOKBACK_ISSUES)
+    selection = selector.select_stories(candidate_notes, last_titles, last_issue_context=last_context)
     if selection is None:
         logger.error("Отборщик не вернул результат — выпуск не сформирован в этом окне")
         return 1
 
-    selected_ids = set(selection.get("selected_story_ids", []))
-    stories = [s for s in selection.get("stories", []) if s["story_id"] in selected_ids]
-    if not stories:
-        logger.info("Отборщик не выбрал ни одного сюжета в этом окне — выпуска не будет, это нормально")
+    # 03.10.2026 — программные фильтры поверх выбора Отборщика (вектор канала,
+    # потолок в 4 сюжета) и порог «достаточно сюжетов, чтобы вообще выходить».
+    stories, dropped = selector.apply_gates(selection)
+    for d in dropped:
+        logger.info("Отсечено фильтром вектора канала: %s", d)
+    if len(stories) < config.V2_MIN_STORIES_FOR_ISSUE:
+        logger.info(
+            "Сюжетов после фильтров %s < минимума %s — выпуска не будет",
+            len(stories), config.V2_MIN_STORIES_FOR_ISSUE,
+        )
+        # Автору — короткое сообщение, а не тишина: иначе «выпуска нет, потому
+        # что нечего публиковать» неотличимо от «пайплайн сломался».
+        reason_lines = [
+            f"Выпуск за сегодня не сформирован: подходящих сюжетов {len(stories)}, "
+            f"нужно минимум {config.V2_MIN_STORIES_FOR_ISSUE}.",
+            f"Новостей, отсеянных как устаревшие (старше {config.V2_MAX_NOTE_AGE_HOURS}ч): {len(stale_notes)}.",
+        ]
+        if dropped:
+            reason_lines.append("Отсечено как не по вектору канала: " + "; ".join(dropped) + ".")
+        _send_to_author("\n".join(reason_lines), parse_mode=None)
         return 0
 
     logger.info("=== Шаг 2: Аналитик ===")

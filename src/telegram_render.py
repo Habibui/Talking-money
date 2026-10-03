@@ -110,6 +110,17 @@ def strip_telegram_html(text: str) -> str:
     return _TAG_RE.sub("", text)
 
 
+# 03.10.2026 — в живом выпуске в поле "link" утекло «(блок 2)»: модель сослалась
+# на соседний блок по номеру, а читатель никаких номеров не видит. Правило 12
+# Аналитика теперь это запрещает, а эта страховка вырезает такую отсылку
+# детерминированно, если модель всё-таки её написала (в скобках, любой падеж).
+_BLOCK_REF_RE = re.compile(r"\s*\(\s*блок[а-я]*\s*\d+\s*\)", re.IGNORECASE)
+
+
+def strip_block_refs(text: str) -> str:
+    return _BLOCK_REF_RE.sub("", text)
+
+
 def render_issue_html(issue: dict) -> str:
     """issue — черновик выпуска (после Фактчекера — обычно
     factcheck["corrected_draft"], но функция принимает любой dict в этом
@@ -133,7 +144,7 @@ def render_issue_html(issue: dict) -> str:
         if block.get("meaning"):
             parts.append(block["meaning"])
         if block.get("link"):
-            parts.append(block["link"])
+            parts.append(strip_block_refs(block["link"]))
         parts.append("")
 
     # 30.09.2026 — "Что это значит для нас" (п.2, решение автора):

@@ -123,6 +123,10 @@ def run(dry_run: bool = True) -> dict:
             "link": item["link"],
             "language": item.get("language", "en"),
             "extracted_at": datetime.now(timezone.utc).isoformat(),
+            # 03.10.2026 — дата публикации у источника (может быть None).
+            # Ставится ДО **note, чтобы ответ Экстрактора случайно не
+            # перетёр её своим одноимённым полем.
+            "published_at": item.get("published_at"),
             **note,
         }
         archive.append_card(card)

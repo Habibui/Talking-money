@@ -134,6 +134,93 @@ def load_last_issue_titles(n: int) -> list[str]:
     return titles
 
 
+def _strip_tags(text: str) -> str:
+    import re
+    return re.sub(r"<[^>]+>", "", text or "").strip()
+
+
+def load_last_issue_summaries(n: int, max_what_chars: int = 220) -> list[str]:
+    """03.10.2026 — для шага 4 Отборщика (повтор темы): по каждому из
+    последних n выпусков — дата, затем заголовки блоков и начало «что
+    произошло» (там живут конкретные числа, по которым видно, что это ТА ЖЕ
+    история). Одних заголовков не хватило: тема доходностей облигаций прошла
+    три выпуска подряд под тремя разными формулировками, и по заголовкам
+    Отборщик не узнавал в ней повтор. Возвращает плоский список строк,
+    старые выпуски первыми; выпуски без draft (старый формат) — только по
+    story_titles."""
+    out = []
+    for issue in load_last_issues(n):
+        date = (issue.get("published_at") or "")[:10]
+        blocks = (issue.get("draft") or {}).get("blocks") or []
+        if not blocks:
+            for t in issue.get("story_titles", []):
+                out.append(f"[{date}] {t}")
+            continue
+        for b in blocks:
+            title = _strip_tags(b.get("title", ""))
+            what = _strip_tags(b.get("what", ""))
+            if len(what) > max_what_chars:
+                what = what[:max_what_chars].rsplit(" ", 1)[0] + "…"
+            out.append(f"[{date}] {title} — {what}")
+    return out
+
+
+_URL_DATE_RE = None
+
+
+def note_published_at(card: dict) -> datetime | None:
+    """Лучшая оценка момента ПУБЛИКАЦИИ новости у источника: поле
+    published_at (с 03.10.2026 пишется Сборщиком), иначе дата из URL вида
+    /2026/09/29/ (CNBC и ряд других ее кладут в ссылку — так отлавливаются и
+    старые заметки архива, у которых published_at ещё нет), иначе None
+    (тогда вызывающий код опирается на extracted_at)."""
+    global _URL_DATE_RE
+    import re
+    raw = card.get("published_at")
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    if _URL_DATE_RE is None:
+        _URL_DATE_RE = re.compile(r"/(20\d\d)/(\d{2})/(\d{2})/")
+    m = _URL_DATE_RE.search(card.get("link", ""))
+    if m:
+        try:
+            return datetime(int(m[1]), int(m[2]), int(m[3]), tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def note_age_hours(card: dict, now: datetime | None = None) -> float:
+    """Возраст новости в часах. Для даты из URL (только день) берём конец
+    этого дня — чтобы не отсечь заметку за «вчера вечером» из-за потери
+    времени суток."""
+    now = now or datetime.now(timezone.utc)
+    published = note_published_at(card)
+    if published is not None:
+        if not card.get("published_at"):  # только дата из URL — берём конец дня
+            published = published + timedelta(hours=23, minutes=59)
+        return max(0.0, (now - published).total_seconds() / 3600)
+    try:
+        extracted = datetime.fromisoformat(card["extracted_at"])
+        if extracted.tzinfo is None:
+            extracted = extracted.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - extracted).total_seconds() / 3600)
+    except (KeyError, ValueError):
+        return 0.0
+
+
+def filter_fresh(cards: list[dict], max_age_hours: float, now: datetime | None = None) -> tuple[list[dict], list[dict]]:
+    """(свежие, отброшенные как устаревшие)."""
+    fresh, stale = [], []
+    for c in cards:
+        (fresh if note_age_hours(c, now) <= max_age_hours else stale).append(c)
+    return fresh, stale
+
+
 # --- Журнал уже извлечённых URL (Сборщик) ------------------------------------
 # Отдельно от load_state()/save_state() в state.py (v1) — см. комментарий у
 # config.V2_SEEN_PATH про то, почему это не общий с v1 файл.

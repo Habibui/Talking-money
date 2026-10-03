@@ -69,23 +69,33 @@ def main() -> int:
     logger.info("=== Шаг 2: Отборщик ===")
     all_cards = archive.load_cards_since(args.hours)
     notes_by_id = {c["id"]: c for c in all_cards}
-    candidate_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
+    important_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
+    # 03.10.2026 — те же фильтры, что в scripts/issue_v2.py (свежесть, вектор
+    # канала, минимум сюжетов): DRY_RUN должен показывать то, что реально
+    # уйдёт автору, а не более мягкую версию.
+    candidate_notes, stale_notes = archive.filter_fresh(important_notes, config.V2_MAX_NOTE_AGE_HOURS)
     logger.info(
-        "Заметок за %sч: %s всего, %s с importance >= %s",
-        args.hours, len(all_cards), len(candidate_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
+        "Заметок за %sч: %s всего, %s с importance >= %s, устарело %s, к Отборщику %s",
+        args.hours, len(all_cards), len(important_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
+        len(stale_notes), len(candidate_notes),
     )
 
     last_titles = archive.load_last_issue_titles(config.V2_SELECTOR_LOOKBACK_ISSUES)
-    selection = selector.select_stories(candidate_notes, last_titles)
+    last_context = archive.load_last_issue_summaries(config.V2_SELECTOR_LOOKBACK_ISSUES)
+    selection = selector.select_stories(candidate_notes, last_titles, last_issue_context=last_context)
     if selection is None:
         logger.error("Отборщик не вернул результат — прогон остановлен")
         return 1
     print(json.dumps(selection, ensure_ascii=False, indent=2))
 
-    selected_ids = set(selection.get("selected_story_ids", []))
-    stories = [s for s in selection.get("stories", []) if s["story_id"] in selected_ids]
-    if not stories:
-        logger.info("Отборщик не выбрал ни одного сюжета для выпуска в этом окне — прогон завершён без выпуска")
+    stories, dropped = selector.apply_gates(selection)
+    for d in dropped:
+        logger.info("Отсечено фильтром вектора канала: %s", d)
+    if len(stories) < config.V2_MIN_STORIES_FOR_ISSUE:
+        logger.info(
+            "Сюжетов после фильтров %s < минимума %s — прогон завершён без выпуска",
+            len(stories), config.V2_MIN_STORIES_FOR_ISSUE,
+        )
         return 0
 
     logger.info("=== Шаг 3: Аналитик ===")
