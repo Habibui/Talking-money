@@ -75,15 +75,22 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src import archive, collector, config, factchecker, analyst, selector, telegram_bot, telegram_render
+from src import archive, collector, config, factchecker, analyst, selector, telegram_bot, telegram_render, timeutil
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("issue_v2")
 
 
 def _send_to_author(text: str, parse_mode: str | None = "HTML") -> bool:
+    # 01.10.2026, вечер — баг, найденный автором: выпуск в личку приходил со
+    # звуком даже ночью (23:00-08:00 МСК) — send_message() здесь никогда не
+    # получал silent=, поэтому действовал дефолт False. v1 (main.py) уже
+    # правильно использует timeutil.is_night_msk() для своих отправок, этот
+    # фикс просто доводит ту же проверку до v2. Смотрим на момент самой
+    # отправки (а не планирования) — так же, как и у v1.
     ok = telegram_bot.send_message(
         text, chat_id=config.TELEGRAM_AUTHOR_CHAT_ID, disable_preview=True, parse_mode=parse_mode,
+        silent=timeutil.is_night_msk(),
     )
     if not ok:
         logger.error("Не удалось отправить сообщение автору (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
