@@ -242,6 +242,13 @@ _THINKING_MANDATORY_MODELS = {
 }
 
 
+# 08.10.2026 — совместимость с новыми моделями (см. call_json_role,
+# fallback_model): модели, которые отклонили поле thinking, и модели, которых
+# API не знает. Живут до конца процесса (один запуск GitHub Actions).
+_NO_THINKING_FIELD: set = set()
+_DEAD_MODELS: set = set()
+
+
 def _thinking_config(model: str) -> dict:
     """{"type": "adaptive"} для моделей, где thinking нельзя выключить
     (см. _THINKING_MANDATORY_MODELS выше) — явно, не пропуская поле
@@ -343,6 +350,7 @@ def call_json_role(
     effort: str | None = None,
     thinking_override: str | None = None,
     on_usage=None,
+    fallback_model: str | None = None,
 ) -> dict | None:
     """Вызывает модель с указанным промптом, разбирает JSON-ответ (терпимо —
     через `raw_decode`, игнорируя текст после первого валидного объекта).
@@ -377,6 +385,14 @@ def call_json_role(
     Нужен `scripts/ab_test_analyst.py` для подсчёта факт-стоимости каждого
     прогона A/B.
 
+    `fallback_model` — необязателен (08.10.2026, под выход Haiku 5.5, у
+    которой не было возможности проверить поведение на реальном API). Если
+    API отвечает 400 с упоминанием `thinking` — повторяет тот же запрос без
+    поля thinking (и запоминает это для модели до конца запуска). Если API
+    не знает основную модель (404 или 400 со словом model) и fallback_model
+    задана — переключается на неё. Оба случая пишутся в лог на уровне
+    WARNING. Без fallback_model и при других ошибках поведение прежнее.
+
     Не проверяет обязательные ключи схемы — это ответственность вызывающего
     кода конкретной роли (у каждой роли свой набор обязательных ключей)."""
     for attempt, max_tokens in enumerate(max_tokens_attempts, start=1):
@@ -392,23 +408,52 @@ def call_json_role(
             # anthropic==0.40.0 таких параметров в сигнатуре create() ещё
             # нет, именованный аргумент упал бы с TypeError раньше любого
             # сетевого запроса (проверено на thinking= в этой же сессии).
-            extra_body = {
-                "thinking": (
-                    {"type": thinking_override} if thinking_override is not None
-                    else _thinking_config(model)
-                )
-            }
-            if effort is not None:
-                extra_body["output_config"] = {"effort": effort}
-
-            response = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_content}],
-                timeout=_request_timeout(max_tokens),
-                extra_body=extra_body,
-            )
+            if fallback_model and model in _DEAD_MODELS:
+                model = fallback_model
+            response = None
+            for _compat in range(3):
+                extra_body = {}
+                if model not in _NO_THINKING_FIELD:
+                    extra_body["thinking"] = (
+                        {"type": thinking_override} if thinking_override is not None
+                        else _thinking_config(model)
+                    )
+                if effort is not None:
+                    extra_body["output_config"] = {"effort": effort}
+                try:
+                    response = client.messages.create(
+                        model=model,
+                        max_tokens=max_tokens,
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_content}],
+                        timeout=_request_timeout(max_tokens),
+                        extra_body=extra_body,
+                    )
+                    break
+                except Exception as api_exc:
+                    msg = str(api_exc).lower()
+                    status = getattr(api_exc, "status_code", None)
+                    if status == 400 and "thinking" in msg and "thinking" in extra_body:
+                        logger.warning(
+                            "%s: модель %s отклонила поле thinking (%s) — повтор без него",
+                            role_name, model, api_exc,
+                        )
+                        _NO_THINKING_FIELD.add(model)
+                        continue
+                    if (
+                        fallback_model and model != fallback_model
+                        and (status == 404 or (status == 400 and "model" in msg))
+                    ):
+                        logger.warning(
+                            "%s: модель %s недоступна (%s) — переключаюсь на %s",
+                            role_name, model, api_exc, fallback_model,
+                        )
+                        _DEAD_MODELS.add(model)
+                        model = fallback_model
+                        continue
+                    raise
+            if response is None:
+                raise RuntimeError("не удалось получить ответ модели")
             raw = "".join(
                 block.text for block in response.content if getattr(block, "type", "") == "text"
             )

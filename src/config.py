@@ -75,7 +75,15 @@ LLM_MODEL = "claude-haiku-4-5-20251001"
 # LLM_MODEL выше остаётся для коротких вспомогательных вызовов (интро
 # дайджеста, подтверждение дублей, правка аббревиатур) и для запасного
 # однопроходного пути.
-LLM_MODEL_SCREEN = LLM_MODEL
+# 08.10.2026 — фильтр v1 на Haiku 5.5 (вышла 07.10.2026, id claude-haiku-5-5,
+# $0.10/$0.50 за млн токенов при запросах до 100 тыс. против $1/$5 у 4.5;
+# источник — страница Anthropic о релизе). or, а не default у get(): GitHub
+# подставляет пустую строку, если переменная не задана. Откат без правки кода:
+# переменная репозитория V1_MODEL_SCREEN=claude-haiku-4-5-20251001.
+# Вспомогательные вызовы (LLM_MODEL выше) намеренно остались на Haiku 4.5: они
+# идут прямым client.messages.create без управления thinking, а как Haiku 5.5
+# ведёт себя без него, не проверено.
+LLM_MODEL_SCREEN = os.environ.get("V1_MODEL_SCREEN") or "claude-haiku-5-5"
 # or, а не значение по умолчанию у get(): GitHub подставляет пустую строку,
 # если переменная репозитория не задана (см. publish.yml).
 LLM_MODEL_WRITER = os.environ.get("V1_MODEL_WRITER") or "claude-sonnet-5"
@@ -282,7 +290,11 @@ ARTICLE_FETCH_HARD_CAP_CHARS = 20000
 # Экстрактор — Haiku 4.5 (та же модель, что и LLM_MODEL v1 выше: дешёвая
 # модель, задача узкая — извлечение фактов по чёткой схеме, не литературный
 # перевод).
-MODEL_EXTRACTOR = "claude-haiku-4-5-20251001"
+# 08.10.2026 — Haiku 5.5 (claude-haiku-5-5), см. LLM_MODEL_SCREEN. Откат без
+# правки кода: переменная репозитория V2_MODEL_EXTRACTOR=claude-haiku-4-5-20251001.
+MODEL_EXTRACTOR = os.environ.get("V2_MODEL_EXTRACTOR") or "claude-haiku-5-5"
+# Запасная модель на случай, если API отклонит основную (см. llm_json.call_json_role).
+MODEL_EXTRACTOR_FALLBACK = "claude-haiku-4-5-20251001"
 
 # Отборщик — Sonnet 5. "claude-sonnet-5" — подтверждённый действующий
 # идентификатор модели (не то же самое, что временный переход v1 на неё

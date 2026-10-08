@@ -156,6 +156,7 @@ def extract_note(item: dict) -> dict | None:
         client, config.MODEL_EXTRACTOR, SYSTEM_PROMPT, user_content,
         max_tokens_attempts=[700, 1400],
         role_name="Экстрактор", log_ctx=f"{item['source']} {item['link']}",
+        fallback_model=config.MODEL_EXTRACTOR_FALLBACK,
     )
     if data is None:
         return None

@@ -102,6 +102,9 @@ jobs:
         if: ${{ (github.event.inputs.mode || 'collect') == 'collect' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 08.10.2026 — модель Экстрактора (по умолчанию Haiku 5.5); откат:
+          # V2_MODEL_EXTRACTOR=claude-haiku-4-5-20251001
+          V2_MODEL_EXTRACTOR: ${{ vars.V2_MODEL_EXTRACTOR }}
         run: python scripts/collect_v2.py
 
       - name: Выпуск (mode=issue)
