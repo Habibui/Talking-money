@@ -97,6 +97,42 @@ def _send_to_author(text: str, parse_mode: str | None = "HTML") -> bool:
     return ok
 
 
+def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason) -> dict:
+    """Запись выпуска для archive/issues.jsonl.
+
+    08.10.2026 — три блокировки Фактчекера подряд (06, 07, 08.10), а в архиве
+    лежал только ИСПРАВЛЕННЫЙ черновик: нельзя было понять, что именно
+    нашёл Фактчекер и не портит ли исправление текст. Теперь кроме `draft`
+    (его читает Отборщик следующих выпусков — без изменений) пишутся:
+      - `draft_original` — черновик Аналитика до исправления (только если он
+        отличается от итогового);
+      - `factcheck` — отчёт без corrected_draft и без «поддержанных» claims
+        (остаётся только их число в claims_total): счётчики, флаги, причина
+        блокировки и список claims с вердиктом не supported.
+    Поведение выпуска и отправки автору не меняется."""
+    claims = factcheck.get("claims", []) or []
+    report = {k: v for k, v in factcheck.items() if k not in ("corrected_draft", "claims")}
+    report["blocked_reason"] = reason
+    report["claims_total"] = len(claims)
+    report["claims_not_supported"] = [c for c in claims if c.get("verdict") != "supported"]
+    record = {
+        "issue_id": f"v2-{datetime.now(timezone.utc).isoformat()}",
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "story_titles": [s["title"] for s in stories],
+        "draft": final_draft,
+        # 26.09.2026 — status="sent_to_author": единственный статус
+        # минимального запуска (см. docstring модуля выше) — публикация в
+        # канал делается автором вручную, скрипт этого не видит и не может
+        # отметить отдельным статусом до появления кнопок/вебхука.
+        "status": "sent_to_author",
+        "factcheck_blocked": blocked,
+        "factcheck": report,
+    }
+    if draft != final_draft:
+        record["draft_original"] = draft
+    return record
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -223,18 +259,7 @@ def main() -> int:
         report = factchecker.format_factcheck_report(factcheck)
         _send_to_author(report, parse_mode=None)
 
-    record = {
-        "issue_id": f"v2-{datetime.now(timezone.utc).isoformat()}",
-        "published_at": datetime.now(timezone.utc).isoformat(),
-        "story_titles": [s["title"] for s in stories],
-        "draft": final_draft,
-        # 26.09.2026 — status="sent_to_author": единственный статус
-        # минимального запуска (см. docstring модуля выше) — публикация в
-        # канал делается автором вручную, скрипт этого не видит и не может
-        # отметить отдельным статусом до появления кнопок/вебхука.
-        "status": "sent_to_author",
-        "factcheck_blocked": blocked,
-    }
+    record = build_issue_record(stories, draft, final_draft, factcheck, blocked, reason)
     archive.append_issue(record)
     logger.info("Выпуск записан в archive/issues.jsonl (status=sent_to_author)")
 
