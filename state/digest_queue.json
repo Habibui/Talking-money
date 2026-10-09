@@ -288,5 +288,15 @@
     "comment_digest_ru": "**Nvidia намекнула, что свободные деньги пойдут не столько на выкуп акций, сколько на стройку ИИ-экосистемы** — акционерам меньше байбэков, зато понятнее, куда утекают миллиарды.",
     "importance": 3,
     "deferred_count": 0
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "Apple урезала заказы на детали для iPhone 18 Pro на 15% — спрос на флагман не оправдал ожиданий",
+    "comment_ru": "По данным Nikkei Asia, в октябре заказы на компоненты для iPhone 18 Pro и Pro Max сократились примерно на 15% — а это самые дорогие и самые маржинальные модели линейки. **Если топовые айфоны продаются хуже плана, это бьёт не только по Apple, но и по всей цепочке поставщиков в Азии**, которые уже подстроились под прежние объёмы.",
+    "link": "https://www.marketwatch.com/story/is-iphone-18-demand-cooling-off-heres-how-deep-apple-reportedly-is-cutting-component-orders-a44244ee?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Заказы на детали для iPhone 18 Pro и Pro Max упали на 15% в октябре** — по данным Nikkei Asia, флагманы Apple продаются хуже, чем рассчитывали, и это уже чувствуют азиатские поставщики компонентов.",
+    "importance": 3,
+    "deferred_count": 0
   }
 ]
