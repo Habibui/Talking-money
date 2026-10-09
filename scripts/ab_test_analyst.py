@@ -179,9 +179,7 @@ def _run_one_participant(participant: dict, stories, notes_by_id, last_titles, u
     if draft is None:
         return {"label": label, "participant": participant, "draft": None, "error": "Аналитик не вернул результат"}
 
-    used_note_ids = set(draft.get("watch_next_source_ids", []))
-    for block in draft.get("blocks", []):
-        used_note_ids.update(block.get("source_ids", []))
+    used_note_ids = factchecker.collect_used_note_ids(draft)
     factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
 
     def _on_factcheck_usage(info):

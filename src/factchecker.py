@@ -161,6 +161,24 @@ def _format_sources(notes_by_id: dict) -> str:
     return "\n".join(lines)
 
 
+def collect_used_note_ids(draft: dict) -> set:
+    """id всех заметок, на которые ссылается черновик: блоки, «что смотреть
+    дальше» И «что это значит для нас» (for_us_source_ids).
+
+    09.10.2026 — баг: for_us_source_ids не попадали в набор, который уходит
+    Фактчекеру. Если Аналитик подтверждал фразу в «для нас» заметкой, которой
+    нет в блоках, Фактчекер не видел источник, объявлял фразу «unsupported»
+    («источника нет в наборе») и удалял её, хотя заметка в архиве существовала
+    и фразу подтверждала (случай выпуска 09.10: Brent подешевел после
+    обещания Трампа не бить по Ирану). Лишнее ложное unsupported к тому же
+    приближало порог блокировки (unsupported_count > 2)."""
+    ids = set(draft.get("watch_next_source_ids", []) or [])
+    ids.update(draft.get("for_us_source_ids", []) or [])
+    for block in draft.get("blocks", []) or []:
+        ids.update(block.get("source_ids", []) or [])
+    return ids
+
+
 def check_issue(
     draft: dict,
     notes_by_id: dict,

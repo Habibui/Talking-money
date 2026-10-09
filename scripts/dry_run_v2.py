@@ -106,9 +106,7 @@ def main() -> int:
     print(json.dumps(draft, ensure_ascii=False, indent=2))
 
     logger.info("=== Шаг 4: Фактчекер ===")
-    used_note_ids = set(draft.get("watch_next_source_ids", []))
-    for block in draft.get("blocks", []):
-        used_note_ids.update(block.get("source_ids", []))
+    used_note_ids = factchecker.collect_used_note_ids(draft)
     factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
 
     factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles)
