@@ -152,20 +152,13 @@ def strip_block_refs(text: str) -> str:
     return _BLOCK_REF_RE.sub("", text)
 
 
-def render_issue_html(issue: dict, header: str | None = None) -> str:
+def render_issue_html(issue: dict) -> str:
     """issue — черновик выпуска (после Фактчекера — обычно
     factcheck["corrected_draft"], но функция принимает любой dict в этом
     формате: hook/blocks/watch_next; hook_block_refs/watch_next_source_ids/
     source_ids игнорируются здесь — они нужны были только Фактчекеру для
-    проверки, в текст поста не идут).
-
-    11.10.2026 — header: необязательная подпись первой строкой (недельный
-    выпуск: «Итоги недели · 5–11 октября»). Уже в виде готового HTML-текста,
-    без <b> — оборачиваем здесь. Для ежедневного выпуска не передаётся."""
-    parts = []
-    if header:
-        parts.extend([f"<b>{header}</b>", ""])
-    parts.extend([f"<b>{issue['hook']}</b>", ""])
+    проверки, в текст поста не идут)."""
+    parts = [f"<b>{issue['hook']}</b>", ""]
 
     for block in issue.get("blocks", []):
         # 26.09.2026 — НЕ оборачиваем в <b> здесь: промпт Аналитика
@@ -200,3 +193,94 @@ def render_issue_html(issue: dict, header: str | None = None) -> str:
         parts.append(f"<b>Что смотреть дальше:</b> {watch_next}")
 
     return "\n".join(parts).strip()
+
+
+# --- Недельный выпуск: отдельное оформление (11.10.2026, решение автора) ------
+# Цель — чтобы «Аналитика недели» с первого взгляда отличалась от обычных
+# постов и дайджестов канала и легко читалась: заголовок-плашка, эмодзи темы
+# у каждого блока, разделители, подписанные секции. Как и в дайджесте
+# (telegram_bot._DIGEST_TOPIC_EMOJI), эмодзи выбирает КОД, а не модель:
+# модель возвращает только текстовый код темы `topic` у блока, символ по нему
+# подставляется здесь — одна опечатка модели не протащит в канал случайный
+# значок. Набор тем — те же шесть, что у дайджеста, плюс две для аналитики.
+WEEKLY_TOPIC_EMOJI = {
+    "oil_gas": "🛢",
+    "energy": "⚡",
+    "markets": "📈",
+    "central_banks": "🏦",
+    "geopolitics": "🌍",
+    "russia": "🇷🇺",
+    "currency": "💵",
+    "prices": "🛒",
+}
+WEEKLY_DEFAULT_EMOJI = "📌"
+WEEKLY_DIVIDER = "▬▬▬▬▬▬▬▬▬▬"
+WEEKLY_HASHTAGS = "#аналитика #итогинедели"
+# Telegram считает до 4096 знаков текста без разметки; берём с запасом.
+WEEKLY_SAFE_LIMIT = 4000
+
+
+def restore_block_topics(original: dict, corrected: dict) -> dict:
+    """Фактчекер возвращает corrected_draft своими словами и может потерять
+    служебное поле `topic` у блоков (оно не часть исходной схемы). Если число
+    блоков не изменилось — переносим `topic` из черновика Аналитика по
+    индексу; если изменилось — блоки без `topic` получат эмодзи по
+    умолчанию (это только значок, не факт). Возвращает corrected."""
+    orig_blocks = original.get("blocks") or []
+    new_blocks = corrected.get("blocks") or []
+    if len(orig_blocks) == len(new_blocks):
+        for ob, nb in zip(orig_blocks, new_blocks):
+            if not nb.get("topic") and ob.get("topic"):
+                nb["topic"] = ob["topic"]
+    return corrected
+
+
+def _weekly_block_html(block: dict) -> str:
+    emoji = WEEKLY_TOPIC_EMOJI.get(block.get("topic"), WEEKLY_DEFAULT_EMOJI)
+    title = block["title"].strip()
+    if "<b>" not in title:  # модель обязана оборачивать сама (правило 13), но не полагаемся
+        title = f"<b>{title}</b>"
+    lines = [f"{emoji} {title}", block["what"]]
+    if block.get("meaning"):
+        lines.append(f"👉 {block['meaning']}")
+    if block.get("link"):
+        lines.append(strip_block_refs(block["link"]))
+    return "\n".join(lines)
+
+
+def _weekly_html(issue: dict, blocks: list[dict], period: str) -> str:
+    parts = [f"📊 <b>АНАЛИТИКА НЕДЕЛИ</b> · {period}", WEEKLY_DIVIDER, "", f"💡 <b>{issue['hook']}</b>", ""]
+    for block in blocks:
+        parts.extend([_weekly_block_html(block), ""])
+    parts.append(WEEKLY_DIVIDER)
+    parts.append("")
+    if issue.get("for_us"):
+        parts.extend([f"🎯 <b>Что это значит для нас</b>\n{issue['for_us']}", ""])
+    if issue.get("watch_next"):
+        parts.extend([f"👀 <b>Что смотреть на следующей неделе</b>\n{issue['watch_next']}", ""])
+    parts.append(WEEKLY_HASHTAGS)
+    return "\n".join(parts).strip()
+
+
+def render_weekly_html(issue: dict, period: str) -> tuple[str, list[str]]:
+    """Недельный выпуск одним сообщением. period — «5–11 октября».
+
+    Всегда ОДНО сообщение (решение автора): если текст не влезает в
+    WEEKLY_SAFE_LIMIT знаков, из выпуска целиком убирается последний блок
+    (блоки идут по убыванию важности — так их отдаёт Отборщик), и так пока не
+    влезет. Блок, на который опирается hook (`hook_block_refs`), не
+    убирается — hook остался бы без опоры. Возвращает (html, список заголовков
+    убранных блоков) — вызывающий код пишет их в лог и сообщает автору."""
+    blocks = list(issue.get("blocks") or [])
+    protected = set(issue.get("hook_block_refs") or [])
+    dropped: list[str] = []
+    html = _weekly_html(issue, blocks, period)
+    while len(_TAG_RE.sub("", html)) > WEEKLY_SAFE_LIMIT and len(blocks) > 1:
+        idx = next((i for i in range(len(blocks) - 1, -1, -1) if i not in protected), None)
+        if idx is None:
+            break
+        dropped.append(_TAG_RE.sub("", blocks[idx].get("title", "")))
+        del blocks[idx]
+        protected = {i if i < idx else i - 1 for i in protected}
+        html = _weekly_html(issue, blocks, period)
+    return html, dropped

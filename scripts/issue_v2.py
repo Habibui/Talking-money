@@ -115,16 +115,16 @@ _MONTHS_GEN = [
 
 
 def week_label(now_utc: datetime | None = None) -> str:
-    """Подпись недельного выпуска: «Итоги недели · 5–11 октября» или, если
-    неделя пересекла границу месяца, «Итоги недели · 28 сентября – 4 октября».
-    Конец — сегодняшняя дата по МСК, начало — шесть дней назад."""
+    """Период недельного выпуска: «5–11 октября» или, если неделя пересекла
+    границу месяца, «28 сентября – 4 октября». Конец — сегодняшняя дата по
+    МСК, начало — шесть дней назад."""
     end = (now_utc or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=3)))
     start = end - timedelta(days=6)
     if start.month == end.month:
         span = f"{start.day}–{end.day} {_MONTHS_GEN[end.month - 1]}"
     else:
         span = f"{start.day} {_MONTHS_GEN[start.month - 1]} – {end.day} {_MONTHS_GEN[end.month - 1]}"
-    return f"Итоги недели · {span}"
+    return span
 
 
 def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason, kind: str = "daily") -> dict:
@@ -278,7 +278,17 @@ def main() -> int:
     final_draft = factcheck.get("corrected_draft", draft)
 
     logger.info("=== Шаг 4: рендер + отправка автору ===")
-    rendered = telegram_render.render_issue_html(final_draft, header=week_label() if weekly else None)
+    if weekly:
+        # Блоки без служебного `topic` (его мог потерять Фактчекер) получают
+        # значение из черновика Аналитика, потом — один рендер в ОДНО сообщение.
+        telegram_render.restore_block_topics(draft, final_draft)
+        rendered, dropped_blocks = telegram_render.render_weekly_html(final_draft, week_label())
+        if dropped_blocks:
+            logger.warning(
+                "Недельный выпуск не влезал в одно сообщение — убраны блоки: %s", "; ".join(dropped_blocks),
+            )
+    else:
+        rendered, dropped_blocks = telegram_render.render_issue_html(final_draft), []
     is_valid, html_errors = telegram_render.validate_telegram_html(rendered)
 
     if is_valid:
@@ -291,9 +301,13 @@ def main() -> int:
         send_text, parse_mode = telegram_render.strip_telegram_html(rendered), None
 
     prefix = "⚠️ Фактчекер заблокировал бы публикацию — черновик ниже уже ИСПРАВЛЕН:\n\n" if blocked else ""
-    # 11.10.2026 — если выпуск (особенно недельный, или исправленный
-    # Фактчекером черновик) не влез в 4096 знаков, он уходит несколькими
-    # сообщениями по границам блоков, а не теряется из-за ошибки Telegram.
+    if dropped_blocks:
+        prefix += "✂️ Не влезло в одно сообщение, убраны блоки: " + "; ".join(dropped_blocks) + "\n\n"
+    # 11.10.2026 — последняя страховка от отказа Telegram (текст > 4096
+    # знаков). Недельный выпуск до сюда доходит уже ужатым до одного
+    # сообщения (render_weekly_html); разбиение по границам блоков нужно
+    # только для ежедневного выпуска и для патологического случая, когда
+    # недельный не удалось ужать (hook опирается на все блоки).
     message_parts = telegram_render.split_message(prefix + send_text)
     if len(message_parts) > 1:
         logger.warning("Выпуск длиннее лимита Telegram — уходит %s сообщениями", len(message_parts))
