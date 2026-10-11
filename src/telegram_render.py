@@ -214,6 +214,7 @@ WEEKLY_TOPIC_EMOJI = {
     "prices": "🛒",
 }
 WEEKLY_DEFAULT_EMOJI = "📌"
+WEEKLY_LABEL = "📊 Аналитика недели"
 WEEKLY_DIVIDER = "▬▬▬▬▬▬▬▬▬▬"
 WEEKLY_HASHTAGS = "#аналитика #итогинедели"
 # Telegram считает до 4096 знаков текста без разметки; берём с запасом.
@@ -249,33 +250,41 @@ def _weekly_block_html(block: dict) -> str:
 
 
 def _weekly_html(issue: dict, blocks: list[dict], period: str) -> str:
-    parts = [f"📊 <b>АНАЛИТИКА НЕДЕЛИ</b> · {period}", WEEKLY_DIVIDER, "", f"💡 <b>{issue['hook']}</b>", ""]
+    # Первая строка — hook (едкий, в голосе канала: его видно в уведомлении),
+    # плашка с периодом — второй строкой, как метка, а не заголовок.
+    parts = [
+        f"🔥 <b>{issue['hook']}</b>",
+        f"<i>{WEEKLY_LABEL} · {period}</i>",
+        WEEKLY_DIVIDER,
+        "",
+    ]
     for block in blocks:
         parts.extend([_weekly_block_html(block), ""])
     parts.append(WEEKLY_DIVIDER)
     parts.append("")
     if issue.get("for_us"):
         parts.extend([f"🎯 <b>Что это значит для нас</b>\n{issue['for_us']}", ""])
-    if issue.get("watch_next"):
-        parts.extend([f"👀 <b>Что смотреть на следующей неделе</b>\n{issue['watch_next']}", ""])
     parts.append(WEEKLY_HASHTAGS)
     return "\n".join(parts).strip()
 
 
-def render_weekly_html(issue: dict, period: str) -> tuple[str, list[str]]:
-    """Недельный выпуск одним сообщением. period — «5–11 октября».
+def render_weekly_html(issue: dict, period: str, limit: int | None = WEEKLY_SAFE_LIMIT) -> tuple[str, list[str]]:
+    """Недельный выпуск. period — «5–11 октября».
 
-    Всегда ОДНО сообщение (решение автора): если текст не влезает в
-    WEEKLY_SAFE_LIMIT знаков, из выпуска целиком убирается последний блок
-    (блоки идут по убыванию важности — так их отдаёт Отборщик), и так пока не
-    влезет. Блок, на который опирается hook (`hook_block_refs`), не
-    убирается — hook остался бы без опоры. Возвращает (html, список заголовков
-    убранных блоков) — вызывающий код пишет их в лог и сообщает автору."""
+    limit — потолок длины (знаков текста без разметки): если текст не
+    влезает, из выпуска целиком убирается последний блок (блоки идут по
+    убыванию важности — так их отдаёт Отборщик), и так пока не влезет. Блок,
+    на который опирается hook (`hook_block_refs`), не убирается — hook остался
+    бы без опоры. limit=None — без ограничения (вариант 2 тестового режима,
+    вызывающий код режет результат на сообщения сам). Возвращает (html,
+    список заголовков убранных блоков) — вызывающий код пишет их в лог и
+    сообщает автору. Раздела «что смотреть дальше» в недельном выпуске нет
+    (решение автора 11.10.2026), поле watch_next игнорируется."""
     blocks = list(issue.get("blocks") or [])
     protected = set(issue.get("hook_block_refs") or [])
     dropped: list[str] = []
     html = _weekly_html(issue, blocks, period)
-    while len(_TAG_RE.sub("", html)) > WEEKLY_SAFE_LIMIT and len(blocks) > 1:
+    while limit is not None and len(_TAG_RE.sub("", html)) > limit and len(blocks) > 1:
         idx = next((i for i in range(len(blocks) - 1, -1, -1) if i not in protected), None)
         if idx is None:
             break

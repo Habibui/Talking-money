@@ -125,6 +125,9 @@ jobs:
           V2_ANALYST_EFFORT: ${{ vars.V2_ANALYST_EFFORT }}
           V2_MODEL_FACTCHECKER: ${{ vars.V2_MODEL_FACTCHECKER }}
           V2_FACTCHECKER_EFFORT: ${{ vars.V2_FACTCHECKER_EFFORT }}
+          # 11.10.2026: тестовый режим недельного выпуска — два варианта поста.
+          # Переменная репозитория V2_WEEKLY_TWO_VARIANTS=0 оставляет только вариант 1.
+          V2_WEEKLY_TWO_VARIANTS: ${{ vars.V2_WEEKLY_TWO_VARIANTS }}
         run: |
           if [ "${{ github.event.inputs.mode }}" = "weekly" ]; then
             python scripts/issue_v2.py --weekly

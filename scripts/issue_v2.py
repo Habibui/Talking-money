@@ -82,6 +82,7 @@ import json
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -165,6 +166,126 @@ def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason, 
     return record
 
 
+def _make_weekly_variant(stories, notes_by_id, last_titles, unlimited: bool) -> dict | None:
+    """Аналитик → Фактчекер для одного варианта недельного выпуска. None при
+    сбое любой из двух ролей (сбой самой проверки — не то же самое, что
+    «проверка прошла», поэтому без Фактчекера вариант не отправляется)."""
+    name = "вариант 2 (без лимита)" if unlimited else "вариант 1 (одно сообщение)"
+    draft = analyst.write_issue(stories, notes_by_id, weekly=True, weekly_unlimited=unlimited)
+    if draft is None:
+        logger.error("Аналитик не вернул результат — %s не сформирован", name)
+        return None
+    used_note_ids = factchecker.collect_used_note_ids(draft)
+    factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
+    factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles, weekly=True)
+    if factcheck is None:
+        logger.error("Фактчекер не вернул результат — %s НЕ отправляется автору", name)
+        return None
+    blocked, reason = factchecker.should_block(factcheck)
+    final_draft = factcheck.get("corrected_draft", draft)
+    # Фактчекер мог потерять служебное поле topic у блоков (значок темы).
+    telegram_render.restore_block_topics(draft, final_draft)
+    return {
+        "stories": stories, "draft": draft, "final": final_draft,
+        "factcheck": factcheck, "blocked": blocked, "reason": reason,
+    }
+
+
+def _deliver_weekly_variant(variant: dict, header_note: str | None, limited: bool) -> bool:
+    """Отправка одного варианта автору. Пояснения (метка варианта, пометка о
+    блокировке Фактчекера, список убранных блоков) уходят ОТДЕЛЬНЫМ коротким
+    сообщением перед постом, а сам пост — чистым: автор пересылает его в
+    канал как есть, без служебных строк внутри."""
+    rendered, dropped_blocks = telegram_render.render_weekly_html(
+        variant["final"], week_label(),
+        limit=telegram_render.WEEKLY_SAFE_LIMIT if limited else None,
+    )
+    if dropped_blocks:
+        logger.warning("Вариант не влезал в одно сообщение — убраны блоки: %s", "; ".join(dropped_blocks))
+    is_valid, html_errors = telegram_render.validate_telegram_html(rendered)
+    if is_valid:
+        send_text, parse_mode = rendered, "HTML"
+    else:
+        logger.warning(
+            "HTML-разметка невалидна для Telegram (%s) — уходит текст без разметки: %s",
+            len(html_errors), "; ".join(html_errors),
+        )
+        send_text, parse_mode = telegram_render.strip_telegram_html(rendered), None
+
+    notes = [header_note] if header_note else []
+    if variant["blocked"]:
+        notes.append("⚠️ Фактчекер заблокировал бы публикацию — текст ниже уже ИСПРАВЛЕН.")
+    if dropped_blocks:
+        notes.append("✂️ Не влезло в одно сообщение, убраны блоки: " + "; ".join(dropped_blocks))
+    if notes and not _send_to_author("\n".join(notes), parse_mode=None):
+        return False
+
+    # split_message — страховка: вариант 1 обычно остаётся одним сообщением;
+    # вариант 2 (без лимита) режется по границам блоков.
+    for part in telegram_render.split_message(send_text):
+        if not _send_to_author(part, parse_mode=parse_mode):
+            return False
+    if variant["blocked"]:
+        logger.warning("Фактчек заблокировал бы публикацию: %s — отправляем разбор отдельным сообщением", variant["reason"])
+        _send_to_author(factchecker.format_factcheck_report(variant["factcheck"]), parse_mode=None)
+    return True
+
+
+def _run_weekly(stories, notes_by_id, last_titles) -> int:
+    """Недельный выпуск (11.10.2026). Тестовый режим (config.V2_WEEKLY_TWO_VARIANTS,
+    по умолчанию включён): автору приходят два варианта — 1) не более
+    V2_WEEKLY_LIMITED_STORIES блоков целиком в одном сообщении, 2) без
+    ограничения объёма (все отобранные сюжеты, несколько сообщений). Оба
+    варианта строятся параллельно из одного и того же выбора Отборщика. В
+    архив пишется вариант 1 (его блоки читает Отборщик в следующие недели),
+    вариант 2 кладётся в ту же запись отдельным полем."""
+    two = config.V2_WEEKLY_TWO_VARIANTS
+    limited_stories = stories[:config.V2_WEEKLY_LIMITED_STORIES]
+
+    logger.info("=== Шаги 2-3: Аналитик + Фактчекер (%s) ===", "два варианта параллельно" if two else "один вариант")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut1 = pool.submit(_make_weekly_variant, limited_stories, notes_by_id, last_titles, False)
+        fut2 = pool.submit(_make_weekly_variant, stories, notes_by_id, last_titles, True) if two else None
+        v1 = fut1.result()
+        v2 = fut2.result() if fut2 else None
+
+    if v1 is None and v2 is None:
+        logger.error("Ни один вариант недельного выпуска не сформирован")
+        return 1
+
+    logger.info("=== Шаг 4: отправка автору ===")
+    ok = True
+    if v1 is not None:
+        ok = _deliver_weekly_variant(
+            v1, "🧪 ВАРИАНТ 1 — с ограничением объёма, всё в одном сообщении" if two else None, limited=True,
+        ) and ok
+    elif two:
+        _send_to_author("🧪 ВАРИАНТ 1 (с ограничением объёма) не сформирован — сбой Аналитика или Фактчекера, см. лог.", parse_mode=None)
+    if v2 is not None:
+        ok = _deliver_weekly_variant(
+            v2, "🧪 ВАРИАНТ 2 — без ограничения объёма (может быть несколько сообщений)", limited=False,
+        ) and ok
+    elif two:
+        _send_to_author("🧪 ВАРИАНТ 2 (без ограничения объёма) не сформирован — сбой Аналитика или Фактчекера, см. лог.", parse_mode=None)
+    if not ok:
+        return 1
+    logger.info("Недельный выпуск отправлен автору в личку (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
+
+    main_v = v1 if v1 is not None else v2
+    record = build_issue_record(
+        main_v["stories"], main_v["draft"], main_v["final"], main_v["factcheck"],
+        main_v["blocked"], main_v["reason"], kind="weekly",
+    )
+    if v1 is not None and v2 is not None:
+        rec2 = build_issue_record(v2["stories"], v2["draft"], v2["final"], v2["factcheck"], v2["blocked"], v2["reason"], kind="weekly")
+        record["variant_unlimited"] = {
+            k: rec2[k] for k in ("story_titles", "draft", "factcheck_blocked", "factcheck", "draft_original") if k in rec2
+        }
+    archive.append_issue(record)
+    logger.info("Выпуск записан в archive/issues.jsonl (kind=weekly, status=sent_to_author)")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -236,7 +357,11 @@ def main() -> int:
 
     # 03.10.2026 — программные фильтры поверх выбора Отборщика (вектор канала,
     # потолок в 4 сюжета) и порог «достаточно сюжетов, чтобы вообще выходить».
-    stories, dropped = selector.apply_gates(selection)
+    stories, dropped = selector.apply_gates(
+        selection,
+        limit=(config.V2_WEEKLY_MAX_STORIES if config.V2_WEEKLY_TWO_VARIANTS else config.V2_WEEKLY_LIMITED_STORIES)
+        if weekly else 4,
+    )
     for d in dropped:
         logger.info("Отсечено фильтром вектора канала: %s", d)
     if len(stories) < config.V2_MIN_STORIES_FOR_ISSUE:
@@ -256,8 +381,11 @@ def main() -> int:
         _send_to_author("\n".join(reason_lines), parse_mode=None)
         return 0
 
+    if weekly:
+        return _run_weekly(stories, notes_by_id, last_titles)
+
     logger.info("=== Шаг 2: Аналитик ===")
-    draft = analyst.write_issue(stories, notes_by_id, weekly=weekly)
+    draft = analyst.write_issue(stories, notes_by_id)
     if draft is None:
         logger.error("Аналитик не вернул результат — выпуск не сформирован")
         return 1
@@ -266,7 +394,7 @@ def main() -> int:
     used_note_ids = factchecker.collect_used_note_ids(draft)
     factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
 
-    factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles, weekly=weekly)
+    factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles)
     if factcheck is None:
         logger.error(
             "Фактчекер не вернул результат — выпуск НЕ отправляется автору "
@@ -278,17 +406,7 @@ def main() -> int:
     final_draft = factcheck.get("corrected_draft", draft)
 
     logger.info("=== Шаг 4: рендер + отправка автору ===")
-    if weekly:
-        # Блоки без служебного `topic` (его мог потерять Фактчекер) получают
-        # значение из черновика Аналитика, потом — один рендер в ОДНО сообщение.
-        telegram_render.restore_block_topics(draft, final_draft)
-        rendered, dropped_blocks = telegram_render.render_weekly_html(final_draft, week_label())
-        if dropped_blocks:
-            logger.warning(
-                "Недельный выпуск не влезал в одно сообщение — убраны блоки: %s", "; ".join(dropped_blocks),
-            )
-    else:
-        rendered, dropped_blocks = telegram_render.render_issue_html(final_draft), []
+    rendered = telegram_render.render_issue_html(final_draft)
     is_valid, html_errors = telegram_render.validate_telegram_html(rendered)
 
     if is_valid:
@@ -301,13 +419,8 @@ def main() -> int:
         send_text, parse_mode = telegram_render.strip_telegram_html(rendered), None
 
     prefix = "⚠️ Фактчекер заблокировал бы публикацию — черновик ниже уже ИСПРАВЛЕН:\n\n" if blocked else ""
-    if dropped_blocks:
-        prefix += "✂️ Не влезло в одно сообщение, убраны блоки: " + "; ".join(dropped_blocks) + "\n\n"
     # 11.10.2026 — последняя страховка от отказа Telegram (текст > 4096
-    # знаков). Недельный выпуск до сюда доходит уже ужатым до одного
-    # сообщения (render_weekly_html); разбиение по границам блоков нужно
-    # только для ежедневного выпуска и для патологического случая, когда
-    # недельный не удалось ужать (hook опирается на все блоки).
+    # знаков): разбиение по границам блоков, а не потеря всего выпуска.
     message_parts = telegram_render.split_message(prefix + send_text)
     if len(message_parts) > 1:
         logger.warning("Выпуск длиннее лимита Telegram — уходит %s сообщениями", len(message_parts))

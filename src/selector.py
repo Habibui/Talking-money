@@ -160,7 +160,7 @@ WEEKLY_ADDENDUM = """
   была на прошлой неделе — отбирай только если на этой неделе есть новый
   конкретный факт (`continuation: true` и `new_fact`).
 - Шаг 5: «свежие» здесь — события последних семи суток (не двух). Из линий с
-  ru_relevance 2 или 3 выбери от 0 до 4 главных и ставь выше те, где есть
+  ru_relevance 2 или 3 выбери от 0 до 6 главных и ставь выше те, где есть
   ДВИЖЕНИЕ (что-то изменилось между началом и концом недели), чем те, где
   одно событие в один день. Количество по-прежнему не цель.
 - Чтобы ответ не разрастался: в массив `stories` включай только сюжеты с
@@ -272,14 +272,17 @@ def select_stories(
     return data
 
 
-def apply_gates(selection: dict) -> tuple[list[dict], list[str]]:
+def apply_gates(selection: dict, limit: int = 4) -> tuple[list[dict], list[str]]:
     """03.10.2026 — программный фильтр поверх выбора Отборщика (промпт сам по
     себе вектор канала не удержал, см. config.V2_SELECTOR_MIN_RU_RELEVANCE).
     Возвращает (сюжеты для Аналитика в порядке selected_story_ids — то есть
     по убыванию важности, не более 4 — потолок блоков Аналитика; список
     строк «что отсечено и почему» для лога/сообщения автору). Сюжет без
     оценки ru_relevance не отсекается: сбой формата ответа не должен
-    молча обнулять выпуск, но предупреждение остаётся в логе."""
+    молча обнулять выпуск, но предупреждение остаётся в логе.
+
+    11.10.2026 — limit: потолок числа сюжетов (по умолчанию 4, как раньше;
+    недельный режим просит больше — см. config.V2_WEEKLY_MAX_STORIES)."""
     by_id = {s["story_id"]: s for s in selection.get("stories", []) if "story_id" in s}
     kept, dropped = [], []
     for sid in selection.get("selected_story_ids", []):
@@ -293,4 +296,4 @@ def apply_gates(selection: dict) -> tuple[list[dict], list[str]]:
             dropped.append(f"{story.get('title')} (связь с российским читателем {rel} из 3)")
             continue
         kept.append(story)
-    return kept[:4], dropped
+    return kept[:limit], dropped
