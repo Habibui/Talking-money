@@ -25,7 +25,7 @@ import logging
 
 import anthropic
 
-from . import config
+from . import archive, config
 from .llm_json import call_json_role
 
 logger = logging.getLogger(__name__)
@@ -248,8 +248,52 @@ _REQUIRED_KEYS = {
     "watch_next", "watch_next_source_ids",
 }
 
+# 11.10.2026 — недельный режим (scripts/issue_v2.py --weekly). Дописывается к
+# SYSTEM_PROMPT; при расхождении действует он. Правила 1-9, 11-13, 15, 17-21
+# (источники, оговорки, цифры, голос, «ничего от себя») остаются полностью.
+# Формат {max_chars} подставляется из config.V2_WEEKLY_MAX_CHARS.
+WEEKLY_ADDENDUM = """
 
-def _format_story(story: dict, notes_by_id: dict) -> str:
+РЕЖИМ «ИТОГИ НЕДЕЛИ» (именно этот запуск). Выпуск выходит раз в неделю и
+охватывает последние семь суток. Это не ежедневный выпуск побольше, а
+другой жанр: читатель уже видел новости дня, ему нужно понять, как неделя
+сложилась в целом. Там, где написанное ниже расходится с правилами выше,
+действует это:
+- Блок — ЛИНИЯ НЕДЕЛИ, а не новость. «what» показывает движение: что было в
+  начале недели, что стало к концу, с датами. «meaning» — что эта динамика
+  говорит и что из неё следует. Перечень событий недели по порядку — это
+  пересказ, перепиши. Если в заметках сюжета нет движения (одно событие в
+  один день) — пиши обычный короткий блок и не изображай динамику.
+- Дата: у каждой заметки есть поле `дата` (например «вт 06.10»). День
+  недели и число в тексте берёшь только из него и только для того факта,
+  к которому оно относится: «во вторник, 6 октября, ...». Никаких «вчера»,
+  «сегодня», «на днях», «недавно» (правило 10 здесь действует без
+  исключений).
+- Цифры рынка (цена нефти, доходность, курс, ставка) всегда с днём, к
+  которому они относятся: «Brent в пятницу — ...», а не «сейчас». Рост или
+  падение «за неделю» пиши, только если в источниках есть ОБЕ точки (начало
+  и конец); есть одна — пиши про один день и не выдумывай вторую.
+- hook — главный тезис недели: одна мысль, которая объясняет, почему неделя
+  сложилась именно так, и держится минимум на двух блоках (укажи их в
+  `hook_block_refs`), либо, если связи между блоками нет, на самом сильном.
+  Не перечень тем. Слова «итоги недели» не пиши ни в hook, ни в заголовках —
+  подпись добавит программа.
+- Правило 14 для этого запуска: не больше 4 блоков, общий объём не больше
+  {max_chars} знаков, одно сообщение. Лишние сюжеты убирай целиком.
+- Правило 16 для этого запуска: `new_fact` — новое по сравнению с прошлым
+  недельным выпуском.
+- «watch_next» — что смотреть на следующей неделе. Конкретные даты и
+  события — только из источников (правило 3); нет в источниках — пиши
+  обобщённо.
+"""
+
+
+def _weekly_addendum() -> str:
+    return WEEKLY_ADDENDUM.format(max_chars=config.V2_WEEKLY_MAX_CHARS)
+
+
+
+def _format_story(story: dict, notes_by_id: dict, with_dates: bool = False) -> str:
     lines = [f"### Сюжет: {story['title']} (важность {story.get('combined_importance', '?')})"]
     # 03.10.2026 — подсказки Отборщика (см. его промпт, шаги 4-5). ru_angle —
     # его гипотеза о канале влияния на российского читателя (НЕ факт, не
@@ -264,8 +308,10 @@ def _format_story(story: dict, notes_by_id: dict) -> str:
         if note is None:
             logger.warning("Аналитик: note_id %s из Отборщика не найден в архиве", note_id)
             continue
+        date_part = f"| дата={archive.format_note_date(note)} " if with_dates else ""
         lines.append(
             f"- source_id={note_id} | источник={note['source']} | ссылка={note['link']} "
+            f"{date_part}"
             f"| глубина={note['content_level']}\n"
             f"  факты: {' '.join(note.get('key_facts', []))}\n"
             f"  market_link: {note.get('market_link') or '—'}"
@@ -282,6 +328,7 @@ def write_issue(
     effort: str | None = None,
     thinking_override: str | None = None,
     on_usage=None,
+    weekly: bool = False,
 ) -> dict | None:
     """stories — отобранные Отборщиком сюжеты (selected_story_ids из его
     ответа, уже отфильтрованные вызывающим кодом). notes_by_id — {note_id:
@@ -307,14 +354,18 @@ def write_issue(
       thinking остаётся всегда `disabled`, вопрос паритета с продом там не
       стоит.
     - `on_usage` — см. `llm_json.call_json_role()`, тот же callback,
-      прокинут без изменений."""
+      прокинут без изменений.
+
+    11.10.2026 — `weekly=True`: недельный режим. К системному промпту
+    дописывается WEEKLY_ADDENDUM, у каждой заметки в запросе появляется
+    поле `дата`. Без weekly поведение прежнее."""
     if not stories:
         logger.info("Аналитик: нет отобранных сюжетов, пропускаем вызов")
         return None
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=90.0)
 
-    stories_block = "\n\n".join(_format_story(s, notes_by_id) for s in stories)
+    stories_block = "\n\n".join(_format_story(s, notes_by_id, with_dates=weekly) for s in stories)
 
     history_block = (
         history_summary.strip() if history_summary and history_summary.strip()
@@ -345,8 +396,10 @@ def write_issue(
     use_model = model or config.MODEL_ANALYST
     use_effort = effort if effort is not None else config.MODEL_ANALYST_EFFORT
 
+    system_prompt = SYSTEM_PROMPT + _weekly_addendum() if weekly else SYSTEM_PROMPT
+
     data = call_json_role(
-        client, use_model, SYSTEM_PROMPT, user_content,
+        client, use_model, system_prompt, user_content,
         max_tokens_attempts=[3500, 7000, 14000],
         role_name="Аналитик",
         effort=use_effort,

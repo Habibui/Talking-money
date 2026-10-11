@@ -31,15 +31,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "collect (почасовой Сборщик) или issue (выпуск, 22:00 МСК, с 30.09.2026 раз в сутки)"
+        description: "collect (почасовой Сборщик), issue (ежедневный выпуск, 22:00 МСК) или weekly (недельный выпуск «Итоги недели», воскресенье 18:05 МСК, с 11.10.2026)"
         required: true
         default: "collect"
         type: choice
         options:
           - collect
           - issue
+          - weekly
       hours:
-        description: "окно заметок для Отборщика в часах (только mode=issue; пусто = дефолт scripts/issue_v2.py, 25ч)"
+        description: "окно заметок для Отборщика в часах (только mode=issue; пусто = дефолт scripts/issue_v2.py, 25ч). В mode=weekly не используется — окно всегда 7 суток"
         required: false
         type: string
 
@@ -85,7 +86,9 @@ concurrency:
 jobs:
   run_v2:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 11.10.2026: было 10. Недельный выпуск — больше заметок у Отборщика и
+    # более длинный черновик у Аналитика/Фактчекера (обе роли на Opus 5.5).
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -107,8 +110,8 @@ jobs:
           V2_MODEL_EXTRACTOR: ${{ vars.V2_MODEL_EXTRACTOR }}
         run: python scripts/collect_v2.py
 
-      - name: Выпуск (mode=issue)
-        if: ${{ github.event.inputs.mode == 'issue' }}
+      - name: Выпуск (mode=issue или mode=weekly)
+        if: ${{ github.event.inputs.mode == 'issue' || github.event.inputs.mode == 'weekly' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -123,7 +126,9 @@ jobs:
           V2_MODEL_FACTCHECKER: ${{ vars.V2_MODEL_FACTCHECKER }}
           V2_FACTCHECKER_EFFORT: ${{ vars.V2_FACTCHECKER_EFFORT }}
         run: |
-          if [ -n "${{ github.event.inputs.hours }}" ]; then
+          if [ "${{ github.event.inputs.mode }}" = "weekly" ]; then
+            python scripts/issue_v2.py --weekly
+          elif [ -n "${{ github.event.inputs.hours }}" ]; then
             python scripts/issue_v2.py --hours="${{ github.event.inputs.hours }}"
           else
             python scripts/issue_v2.py

@@ -106,30 +106,39 @@ def append_issue(issue_record: dict) -> None:
         f.write("\n")
 
 
-def load_last_issues(n: int) -> list[dict]:
-    """Последние n выпусков (по порядку файла — он append-only, так что
-    последние строки файла и есть последние по времени выпуски). Пустой
-    список, если файла ещё нет (первый запуск v2 — нормальный случай, не
-    ошибка)."""
+def load_last_issues(n: int, kind: str = "daily") -> list[dict]:
+    """Последние n выпусков заданного вида (по порядку файла — он append-only,
+    так что последние строки файла и есть последние по времени выпуски).
+    Пустой список, если файла ещё нет (первый запуск v2 — нормальный случай,
+    не ошибка).
+
+    11.10.2026 — `kind`: появились недельные выпуски (запись с
+    "kind": "weekly"). Ежедневные и недельные памяти не смешиваем:
+    ежедневный Отборщик не должен считать темой «уже была» сюжет из
+    недельного обзора и наоборот. Записи без поля kind (всё, что написано
+    до 11.10.2026) — ежедневные."""
     if not os.path.exists(config.ARCHIVE_ISSUES_PATH):
         return []
     with open(config.ARCHIVE_ISSUES_PATH, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
     issues = []
-    for line in lines[-n:]:
+    for line in lines:
         try:
-            issues.append(json.loads(line))
+            issue = json.loads(line)
         except json.JSONDecodeError:
             logger.warning("Повреждённая строка в %s, пропускаем", config.ARCHIVE_ISSUES_PATH)
-    return issues
+            continue
+        if (issue.get("kind") or "daily") == kind:
+            issues.append(issue)
+    return issues[-n:]
 
 
-def load_last_issue_titles(n: int) -> list[str]:
+def load_last_issue_titles(n: int, kind: str = "daily") -> list[str]:
     """Заголовки сюжетов последних n выпусков, единым списком (без разбивки
     по выпускам — Отборщику для шага 4 достаточно самого списка заголовков,
     см. format-v2-prompts-draft.md, «Вход» раздела Отборщика)."""
     titles = []
-    for issue in load_last_issues(n):
+    for issue in load_last_issues(n, kind):
         titles.extend(issue.get("story_titles", []))
     return titles
 
@@ -139,7 +148,7 @@ def _strip_tags(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text or "").strip()
 
 
-def load_last_issue_summaries(n: int, max_what_chars: int = 220) -> list[str]:
+def load_last_issue_summaries(n: int, max_what_chars: int = 220, kind: str = "daily") -> list[str]:
     """03.10.2026 — для шага 4 Отборщика (повтор темы): по каждому из
     последних n выпусков — дата, затем заголовки блоков и начало «что
     произошло» (там живут конкретные числа, по которым видно, что это ТА ЖЕ
@@ -149,7 +158,7 @@ def load_last_issue_summaries(n: int, max_what_chars: int = 220) -> list[str]:
     старые выпуски первыми; выпуски без draft (старый формат) — только по
     story_titles."""
     out = []
-    for issue in load_last_issues(n):
+    for issue in load_last_issues(n, kind):
         date = (issue.get("published_at") or "")[:10]
         blocks = (issue.get("draft") or {}).get("blocks") or []
         if not blocks:
@@ -211,6 +220,28 @@ def note_age_hours(card: dict, now: datetime | None = None) -> float:
         return max(0.0, (now - extracted).total_seconds() / 3600)
     except (KeyError, ValueError):
         return 0.0
+
+
+_WEEKDAYS_RU = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def format_note_date(card: dict) -> str:
+    """Дата новости для недельного выпуска, вида «вт 06.10» (МСК). Берётся
+    лучшая оценка момента публикации (note_published_at), а если её нет —
+    момент извлечения. Нужна потому, что в недельном выпуске важно, КАКОГО
+    дня факт (динамика «в понедельник … к пятнице»), а Аналитик и Фактчекер
+    иначе видят только обезличенный список фактов. Пустая строка, если даты
+    нет совсем."""
+    dt = note_published_at(card)
+    if dt is None:
+        try:
+            dt = datetime.fromisoformat(card["extracted_at"])
+        except (KeyError, ValueError):
+            return ""
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    msk = dt.astimezone(timezone(timedelta(hours=3)))
+    return f"{_WEEKDAYS_RU[msk.weekday()]} {msk.strftime('%d.%m')}"
 
 
 def filter_fresh(cards: list[dict], max_age_hours: float, now: datetime | None = None) -> tuple[list[dict], list[dict]]:

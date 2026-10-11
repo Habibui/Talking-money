@@ -140,6 +140,35 @@ importance отдельной заметки — учитывай, есть ли
 
 _REQUIRED_KEYS = {"stories", "selected_story_ids", "connection"}
 
+# 11.10.2026 — недельный режим (scripts/issue_v2.py --weekly). Дописывается к
+# SYSTEM_PROMPT, а не заменяет его: шаги 2, 3, 5 (военная тема, опора,
+# вектор канала) и формат ответа те же. Отдельный промпт целиком был бы
+# копией ~200 строк, которую пришлось бы вести в двух местах.
+WEEKLY_ADDENDUM = """
+
+РЕЖИМ «ИТОГИ НЕДЕЛИ» (именно этот запуск). Выпуск выходит раз в неделю и
+охватывает последние семь суток. Это не «ежедневный выпуск побольше», а
+другой жанр: показать, как темы развивались от начала недели к концу.
+Везде, где написанное ниже расходится с шагами выше, действует это:
+- У каждой заметки указана дата (`дата=`). Заметок много.
+- Шаг 1: сюжет здесь — ЛИНИЯ НЕДЕЛИ. Заметки одной темы за разные дни
+  (решение в понедельник, реакция рынка во вторник, итог в пятницу) собирай
+  в ОДИН сюжет, если между ними реальная причинная нить. Разные события
+  разных регуляторов или стран по-прежнему разные сюжеты; общее число или
+  общая тема связью не считаются.
+- Шаг 4: «прошлые выпуски» ниже — это прошлые НЕДЕЛЬНЫЕ выпуски. Тема уже
+  была на прошлой неделе — отбирай только если на этой неделе есть новый
+  конкретный факт (`continuation: true` и `new_fact`).
+- Шаг 5: «свежие» здесь — события последних семи суток (не двух). Из линий с
+  ru_relevance 2 или 3 выбери от 0 до 4 главных и ставь выше те, где есть
+  ДВИЖЕНИЕ (что-то изменилось между началом и концом недели), чем те, где
+  одно событие в один день. Количество по-прежнему не цель.
+- Чтобы ответ не разрастался: в массив `stories` включай только сюжеты с
+  ru_relevance 2 или 3 (остальные не перечисляй), а `why_grouped` пиши не
+  длиннее 12 слов.
+"""
+
+
 
 def _format_age(card: dict) -> str:
     from . import archive
@@ -147,11 +176,14 @@ def _format_age(card: dict) -> str:
     return f"{round(hours)}ч" if hours < 48 else f"{round(hours / 24)}дн"
 
 
-def _format_notes(notes: list[dict]) -> str:
+def _format_notes(notes: list[dict], with_dates: bool = False) -> str:
+    from . import archive
     lines = []
     for note in notes:
+        date_part = f"| дата={archive.format_note_date(note)} " if with_dates else ""
         lines.append(
             f"- id={note['id']} | источник={note['source']} | важность={note['importance']} "
+            f"{date_part}"
             f"| возраст={_format_age(note)} | глубина={note['content_level']} "
             f"| регион={note.get('region', '')} | "
             f"теги={','.join(note.get('tags_en', []))}\n"
@@ -164,6 +196,7 @@ def select_stories(
     notes: list[dict],
     last_issue_titles: list[str],
     last_issue_context: list[str] | None = None,
+    weekly: bool = False,
 ) -> dict | None:
     """notes — заметки (уже отфильтрованные вызывающим кодом по
     importance >= config.V2_SELECTOR_MIN_IMPORTANCE и по свежести, см.
@@ -176,7 +209,13 @@ def select_stories(
     используется ВМЕСТО заголовков (там заголовки уже есть). Необязателен —
     старые вызовы (dry_run_v2.py, ab_test_analyst.py) продолжают работать
     как раньше. Возвращает JSON-ответ Отборщика или None при неустранимой
-    ошибке."""
+    ошибке.
+
+    11.10.2026 — weekly=True: недельный режим. К системному промпту
+    дописывается WEEKLY_ADDENDUM, заметки показываются с датой, бюджет
+    токенов другой; last_issue_titles/last_issue_context вызывающий код
+    должен передать уже по НЕДЕЛЬНЫМ выпускам (archive.load_last_issue_*
+    с kind="weekly"). Без weekly поведение прежнее."""
     if not notes:
         logger.info("Отборщик: нет заметок с importance >= %s, пропускаем вызов", config.V2_SELECTOR_MIN_IMPORTANCE)
         return {"stories": [], "selected_story_ids": [], "connection": None}
@@ -188,10 +227,20 @@ def select_stories(
         "\n".join(f"- {t}" for t in lookback_lines)
         if lookback_lines else "(нет — это один из первых выпусков v2)"
     )
-    user_content = (
-        f"Заметки за период с прошлого выпуска:\n{_format_notes(notes)}\n\n"
-        f"Содержание трёх последних выпусков (для шага 4):\n{lookback_block}\n"
-    )
+    if weekly:
+        system_prompt = SYSTEM_PROMPT + WEEKLY_ADDENDUM
+        user_content = (
+            f"Заметки за последние семь суток:\n{_format_notes(notes, with_dates=True)}\n\n"
+            f"Содержание прошлых недельных выпусков (для шага 4):\n{lookback_block}\n"
+        )
+        attempts = [6000, 12000]
+    else:
+        system_prompt = SYSTEM_PROMPT
+        user_content = (
+            f"Заметки за период с прошлого выпуска:\n{_format_notes(notes)}\n\n"
+            f"Содержание трёх последних выпусков (для шага 4):\n{lookback_block}\n"
+        )
+        attempts = [4500, 9000]
 
     # 26.09.2026 — первый реальный DRY_RUN: при max_tokens=2000 и 37 заметках
     # на входе ответ обрывался настолько рано, что текстового блока не
@@ -200,8 +249,8 @@ def select_stories(
     # входа — здесь вход и так уже отфильтрован по importance вызывающим
     # кодом, дальше сокращать нечего.
     data = call_json_role(
-        client, config.MODEL_SELECTOR, SYSTEM_PROMPT, user_content,
-        max_tokens_attempts=[4500, 9000],
+        client, config.MODEL_SELECTOR, system_prompt, user_content,
+        max_tokens_attempts=attempts,
         role_name="Отборщик",
     )
     if data is None:

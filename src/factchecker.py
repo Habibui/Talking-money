@@ -16,7 +16,7 @@ import logging
 
 import anthropic
 
-from . import config
+from . import archive, config
 from .llm_json import call_json_role
 
 logger = logging.getLogger(__name__)
@@ -150,11 +150,34 @@ _REQUIRED_KEYS = {
 }
 
 
-def _format_sources(notes_by_id: dict) -> str:
+# 11.10.2026 — недельный режим (scripts/issue_v2.py --weekly). Дописывается к
+# SYSTEM_PROMPT. Пороги блокировки (should_block) не меняются.
+WEEKLY_ADDENDUM = """
+
+РЕЖИМ «ИТОГИ НЕДЕЛИ» (именно этот запуск). Выпуск охватывает неделю, у
+каждого источника есть поле `дата` (например «вт 06.10»). Помимо обычных
+проверок проверь:
+- День недели и число в тексте совпадают с `дата` источника ИМЕННО ЭТОГО
+  факта. «В среду» про факт из заметки от вторника — искажённая дата, это
+  unsupported.
+- Утверждение о динамике («выросла за неделю», «к пятнице подешевела»,
+  «с понедельника») требует в источниках двух точек — и начала, и конца.
+  Если подтверждается только одна, динамика unsupported; верни в
+  corrected_draft формулировку про одну точку с её днём.
+- Цифра отнесена к тому дню, к которому относится в источнике, а не к
+  другому и не к «сейчас».
+- «Вчера», «сегодня», «на днях», «недавно» в тексте — замечание: замени на
+  день недели и число из источника.
+"""
+
+
+def _format_sources(notes_by_id: dict, with_dates: bool = False) -> str:
     lines = []
     for note_id, note in notes_by_id.items():
+        date_part = f"| дата={archive.format_note_date(note)} " if with_dates else ""
         lines.append(
             f"- source_id={note_id} | источник={note['source']} | ссылка={note['link']} "
+            f"{date_part}"
             f"| глубина={note['content_level']}\n"
             f"  факты: {' '.join(note.get('key_facts', []))}"
         )
@@ -185,6 +208,7 @@ def check_issue(
     last_issue_titles: list[str] | None = None,
     model: str | None = None,
     on_usage=None,
+    weekly: bool = False,
 ) -> dict | None:
     """draft — черновик Аналитика (hook/hook_block_refs/blocks/for_us/
     for_us_source_ids/watch_next/watch_next_source_ids). notes_by_id — все заметки, соответствующие
@@ -208,7 +232,12 @@ def check_issue(
     Фактчекер сам в сравнении не участвует, см. бриф) для всех трёх
     черновиков — `model` позволяет это явно зафиксировать в вызывающем
     коде теста, не полагаясь на текущее значение переменной окружения
-    `V2_MODEL_FACTCHECKER` в момент запуска."""
+    `V2_MODEL_FACTCHECKER` в момент запуска.
+
+    11.10.2026 — `weekly=True`: недельный режим. К системному промпту
+    дописывается WEEKLY_ADDENDUM, у каждого источника в запросе появляется
+    поле `дата` (иначе проверить «во вторник … к пятнице» нечем). Без weekly
+    поведение прежнее."""
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=90.0)
 
     lookback_block = (
@@ -218,7 +247,7 @@ def check_issue(
 
     user_content = (
         f"Черновик выпуска (JSON):\n{json.dumps(draft, ensure_ascii=False, indent=2)}\n\n"
-        f"Первоисточники (заметки по source_id):\n{_format_sources(notes_by_id)}\n\n"
+        f"Первоисточники (заметки по source_id):\n{_format_sources(notes_by_id, with_dates=weekly)}\n\n"
         f"Заголовки сюжетов прошлых выпусков (для паттерна 4):\n{lookback_block}\n"
     )
 
@@ -245,8 +274,10 @@ def check_issue(
     # наблюдениям одного дня.
     use_model = model or config.MODEL_FACTCHECKER
 
+    system_prompt = SYSTEM_PROMPT + WEEKLY_ADDENDUM if weekly else SYSTEM_PROMPT
+
     data = call_json_role(
-        client, use_model, SYSTEM_PROMPT, user_content,
+        client, use_model, system_prompt, user_content,
         max_tokens_attempts=[12000, 20000],
         role_name="Фактчекер",
         effort=config.MODEL_FACTCHECKER_EFFORT,

@@ -110,6 +110,37 @@ def strip_telegram_html(text: str) -> str:
     return _TAG_RE.sub("", text)
 
 
+TELEGRAM_TEXT_LIMIT = 4096
+
+
+def split_message(text: str, limit: int = 3900) -> list[str]:
+    """11.10.2026 — страховка от отказа Telegram (400, текст длиннее 4096
+    знаков) для готового сообщения. Длину считаем по тексту БЕЗ разметки —
+    Telegram считает именно его. Если уложились — возвращаем как есть, одним
+    элементом (обычный случай: ежедневный выпуск целится в 3500, недельный в
+    3800). Если нет — режем по границам абзацев ("\n\n"): блок выпуска —
+    это один абзац-группа с собственными тегами, так что разметка в частях
+    остаётся целой. Абзац, который сам длиннее лимита, остаётся целым (его
+    не режем посреди тега) — это крайний случай, отправка тогда упадёт, как
+    и раньше, а ошибка попадёт в лог."""
+    def plain_len(t: str) -> int:
+        return len(_TAG_RE.sub("", t))
+
+    if plain_len(text) <= TELEGRAM_TEXT_LIMIT:
+        return [text]
+    parts, current = [], ""
+    for para in text.split("\n\n"):
+        candidate = f"{current}\n\n{para}" if current else para
+        if current and plain_len(candidate) > limit:
+            parts.append(current)
+            current = para
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    return parts
+
+
 # 03.10.2026 — в живом выпуске в поле "link" утекло «(блок 2)»: модель сослалась
 # на соседний блок по номеру, а читатель никаких номеров не видит. Правило 12
 # Аналитика теперь это запрещает, а эта страховка вырезает такую отсылку
@@ -121,13 +152,20 @@ def strip_block_refs(text: str) -> str:
     return _BLOCK_REF_RE.sub("", text)
 
 
-def render_issue_html(issue: dict) -> str:
+def render_issue_html(issue: dict, header: str | None = None) -> str:
     """issue — черновик выпуска (после Фактчекера — обычно
     factcheck["corrected_draft"], но функция принимает любой dict в этом
     формате: hook/blocks/watch_next; hook_block_refs/watch_next_source_ids/
     source_ids игнорируются здесь — они нужны были только Фактчекеру для
-    проверки, в текст поста не идут)."""
-    parts = [f"<b>{issue['hook']}</b>", ""]
+    проверки, в текст поста не идут).
+
+    11.10.2026 — header: необязательная подпись первой строкой (недельный
+    выпуск: «Итоги недели · 5–11 октября»). Уже в виде готового HTML-текста,
+    без <b> — оборачиваем здесь. Для ежедневного выпуска не передаётся."""
+    parts = []
+    if header:
+        parts.extend([f"<b>{header}</b>", ""])
+    parts.extend([f"<b>{issue['hook']}</b>", ""])
 
     for block in issue.get("blocks", []):
         # 26.09.2026 — НЕ оборачиваем в <b> здесь: промпт Аналитика

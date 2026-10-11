@@ -25,6 +25,18 @@
  * круглый год (без перехода на летнее время):
  *   "0 * * * *"    -> mode=collect   (почасово, в начале каждого часа)
  *   "0 19 * * *"   -> mode=issue     (19:00 UTC = 22:00 МСК)
+ *   "5 15 * * SUN" -> mode=weekly    (воскресенье 15:05 UTC = 18:05 МСК)
+ *
+ * 11.10.2026 — решение автора: недельный выпуск «Итоги недели» работает
+ * ПАРАЛЛЕЛЬНО с остальным (mode=weekly, scripts/issue_v2.py --weekly).
+ * Время 18:05, а не 18:00, намеренно: в :00 каждого часа стартует и
+ * почасовой collect, а у workflow одна concurrency-группа с cancel-in-
+ * progress — разнос на 5 минут не даёт им отменять друг друга. День недели
+ * записан именем (SUN), а не цифрой: нумерация дней недели у cron-систем
+ * разная, имя читается одинаково везде. Ежедневный триггер "0 19 * * *"
+ * остаётся, пока автор не примет первый недельный выпуск; после этого его
+ * удаляют в Settings -> Triggers (строку ниже менять не нужно — неизвестный
+ * cron просто логируется и ничего не запускает).
  *
  * 30.09.2026 — решение автора (п.1, гибридный формат v1+v2): было два
  * issue-триггера в день (08:05 и 19:05 МСК), стал один, в 22:00 МСК —
@@ -47,6 +59,7 @@ const WORKFLOW_FILE = "publish_v2.yml";
 function modeForCron(cron) {
   if (cron === "0 * * * *") return "collect";
   if (cron === "0 19 * * *") return "issue";
+  if (cron === "5 15 * * SUN") return "weekly";
   return null;
 }
 
@@ -83,7 +96,7 @@ export default {
   async scheduled(event, env, ctx) {
     const mode = modeForCron(event.cron);
     if (!mode) {
-      console.error(`Незнакомая cron-строка у этого срабатывания: "${event.cron}" — не знаю, какой mode дёргать. Проверь, что здесь (modeForCron) и в Settings -> Triggers указаны одни и те же две cron-строки.`);
+      console.error(`Незнакомая cron-строка у этого срабатывания: "${event.cron}" — не знаю, какой mode дёргать. Проверь, что здесь (modeForCron) и в Settings -> Triggers указаны одни и те же cron-строки.`);
       return;
     }
     await dispatchWorkflow(mode, env);
@@ -94,13 +107,14 @@ export default {
   // воскресенье: открой в браузере (или curl)
   //   https://<имя-worker'а>.<твой-поддомен>.workers.dev/?mode=collect
   //   https://<имя-worker'а>.<твой-поддомен>.workers.dev/?mode=issue
+  //   https://<имя-worker'а>.<твой-поддомен>.workers.dev/?mode=weekly
   // и сразу увидишь, ушёл ли запуск в GitHub Actions, не дожидаясь cron.
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const mode = url.searchParams.get("mode");
-    if (mode !== "collect" && mode !== "issue") {
+    if (mode !== "collect" && mode !== "issue" && mode !== "weekly") {
       return new Response(
-        "Добавь в адрес ?mode=collect или ?mode=issue, чтобы запустить вручную для проверки.",
+        "Добавь в адрес ?mode=collect, ?mode=issue или ?mode=weekly, чтобы запустить вручную для проверки.",
         { status: 400 },
       );
     }

@@ -58,9 +58,20 @@ archive.load_last_issue_titles() (см. src/selector.py, шаг 4 промпта
 "published"/"rejected" на второй неделе, когда добавятся кнопки), они
 допишутся отдельно, не меняя эту функцию.
 
+11.10.2026 — решение автора: добавлен недельный выпуск (флаг --weekly,
+workflow publish_v2.yml mode=weekly, по воскресеньям 18:05 МСК через
+Cloudflare Worker). Те же четыре шага (Сборщик → Отборщик → Аналитик →
+Фактчекер) и тот же путь доставки (автору в личку), но: окно заметок 7
+суток (config.V2_WEEKLY_HOURS), порог свежести равен окну, память прошлых
+выпусков — только НЕДЕЛЬНЫЕ выпуски (archive kind="weekly"), у промптов трёх
+ролей дописан недельный раздел, у заметок в запросе есть дата, выпуск
+подписывается «Итоги недели · <даты>». Ежедневный режим без флага работает
+как раньше.
+
 Запуск:
   python3 scripts/issue_v2.py                  # окно по умолчанию (см. --hours)
   python3 scripts/issue_v2.py --hours=25        # явное окно заметок для Отборщика
+  python3 scripts/issue_v2.py --weekly          # недельный выпуск (окно 168ч)
 
 ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHOR_CHAT_ID обязательны —
 без последнего скрипт не может выполнить единственную свою задачу (доставить
@@ -71,7 +82,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -97,7 +108,26 @@ def _send_to_author(text: str, parse_mode: str | None = "HTML") -> bool:
     return ok
 
 
-def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason) -> dict:
+_MONTHS_GEN = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def week_label(now_utc: datetime | None = None) -> str:
+    """Подпись недельного выпуска: «Итоги недели · 5–11 октября» или, если
+    неделя пересекла границу месяца, «Итоги недели · 28 сентября – 4 октября».
+    Конец — сегодняшняя дата по МСК, начало — шесть дней назад."""
+    end = (now_utc or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=3)))
+    start = end - timedelta(days=6)
+    if start.month == end.month:
+        span = f"{start.day}–{end.day} {_MONTHS_GEN[end.month - 1]}"
+    else:
+        span = f"{start.day} {_MONTHS_GEN[start.month - 1]} – {end.day} {_MONTHS_GEN[end.month - 1]}"
+    return f"Итоги недели · {span}"
+
+
+def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason, kind: str = "daily") -> dict:
     """Запись выпуска для archive/issues.jsonl.
 
     08.10.2026 — три блокировки Фактчекера подряд (06, 07, 08.10), а в архиве
@@ -127,6 +157,8 @@ def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason) 
         "status": "sent_to_author",
         "factcheck_blocked": blocked,
         "factcheck": report,
+        # 11.10.2026 — вид выпуска: "daily" | "weekly" (см. archive.load_last_issues).
+        "kind": kind,
     }
     if draft != final_draft:
         record["draft_original"] = draft
@@ -136,6 +168,11 @@ def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason) 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
+        "--weekly", action="store_true",
+        help="недельный выпуск (итоги недели): окно config.V2_WEEKLY_HOURS, недельные промпты, "
+             "память — только прошлые недельные выпуски. --hours в этом режиме игнорируется",
+    )
+    parser.add_argument(
         "--hours", type=int, default=25,
         help="окно заметок для Отборщика в часах (по умолчанию 25ч — при одном выпуске в сутки, "
              "22:00 МСК, промежуток между соседними выпусками 24ч, плюс небольшой запас; "
@@ -143,6 +180,12 @@ def main() -> int:
              "выпусков, шаг 4 его промпта, так что запас по времени не создаёт риска задвоения)",
     )
     args = parser.parse_args()
+    weekly = args.weekly
+    kind = "weekly" if weekly else "daily"
+    window_hours = config.V2_WEEKLY_HOURS if weekly else args.hours
+    max_age_hours = config.V2_WEEKLY_HOURS if weekly else config.V2_MAX_NOTE_AGE_HOURS
+    lookback_n = config.V2_WEEKLY_LOOKBACK_ISSUES if weekly else config.V2_SELECTOR_LOOKBACK_ISSUES
+    period_word = "неделю" if weekly else "сегодня"
 
     missing = [
         name for name, val in (
@@ -170,23 +213,23 @@ def main() -> int:
         )
 
     logger.info("=== Шаг 1: Отборщик ===")
-    all_cards = archive.load_cards_since(args.hours)
+    all_cards = archive.load_cards_since(window_hours)
     notes_by_id = {c["id"]: c for c in all_cards}
     important_notes = [c for c in all_cards if c.get("importance", 0) >= config.V2_SELECTOR_MIN_IMPORTANCE]
     # 03.10.2026 — свежесть: в выпуск 03.10 попала новость 29.09 (Сборщик
     # добрал её в архив только 02.10), а окно по extracted_at этого не видит.
-    candidate_notes, stale_notes = archive.filter_fresh(important_notes, config.V2_MAX_NOTE_AGE_HOURS)
+    candidate_notes, stale_notes = archive.filter_fresh(important_notes, max_age_hours)
     logger.info(
         "Заметок за %sч: %s всего, %s с importance >= %s, из них устарели (старше %sч) %s, к Отборщику идут %s",
-        args.hours, len(all_cards), len(important_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
-        config.V2_MAX_NOTE_AGE_HOURS, len(stale_notes), len(candidate_notes),
+        window_hours, len(all_cards), len(important_notes), config.V2_SELECTOR_MIN_IMPORTANCE,
+        max_age_hours, len(stale_notes), len(candidate_notes),
     )
     for c in stale_notes:
         logger.info("  устарела: %s %s (%.0fч)", c.get("source"), c.get("link"), archive.note_age_hours(c))
 
-    last_titles = archive.load_last_issue_titles(config.V2_SELECTOR_LOOKBACK_ISSUES)
-    last_context = archive.load_last_issue_summaries(config.V2_SELECTOR_LOOKBACK_ISSUES)
-    selection = selector.select_stories(candidate_notes, last_titles, last_issue_context=last_context)
+    last_titles = archive.load_last_issue_titles(lookback_n, kind=kind)
+    last_context = archive.load_last_issue_summaries(lookback_n, kind=kind)
+    selection = selector.select_stories(candidate_notes, last_titles, last_issue_context=last_context, weekly=weekly)
     if selection is None:
         logger.error("Отборщик не вернул результат — выпуск не сформирован в этом окне")
         return 1
@@ -204,9 +247,9 @@ def main() -> int:
         # Автору — короткое сообщение, а не тишина: иначе «выпуска нет, потому
         # что нечего публиковать» неотличимо от «пайплайн сломался».
         reason_lines = [
-            f"Выпуск за сегодня не сформирован: подходящих сюжетов {len(stories)}, "
+            f"Выпуск за {period_word} не сформирован: подходящих сюжетов {len(stories)}, "
             f"нужно минимум {config.V2_MIN_STORIES_FOR_ISSUE}.",
-            f"Новостей, отсеянных как устаревшие (старше {config.V2_MAX_NOTE_AGE_HOURS}ч): {len(stale_notes)}.",
+            f"Новостей, отсеянных как устаревшие (старше {max_age_hours}ч): {len(stale_notes)}.",
         ]
         if dropped:
             reason_lines.append("Отсечено как не по вектору канала: " + "; ".join(dropped) + ".")
@@ -214,7 +257,7 @@ def main() -> int:
         return 0
 
     logger.info("=== Шаг 2: Аналитик ===")
-    draft = analyst.write_issue(stories, notes_by_id)
+    draft = analyst.write_issue(stories, notes_by_id, weekly=weekly)
     if draft is None:
         logger.error("Аналитик не вернул результат — выпуск не сформирован")
         return 1
@@ -223,7 +266,7 @@ def main() -> int:
     used_note_ids = factchecker.collect_used_note_ids(draft)
     factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
 
-    factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles)
+    factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles, weekly=weekly)
     if factcheck is None:
         logger.error(
             "Фактчекер не вернул результат — выпуск НЕ отправляется автору "
@@ -235,7 +278,7 @@ def main() -> int:
     final_draft = factcheck.get("corrected_draft", draft)
 
     logger.info("=== Шаг 4: рендер + отправка автору ===")
-    rendered = telegram_render.render_issue_html(final_draft)
+    rendered = telegram_render.render_issue_html(final_draft, header=week_label() if weekly else None)
     is_valid, html_errors = telegram_render.validate_telegram_html(rendered)
 
     if is_valid:
@@ -248,8 +291,15 @@ def main() -> int:
         send_text, parse_mode = telegram_render.strip_telegram_html(rendered), None
 
     prefix = "⚠️ Фактчекер заблокировал бы публикацию — черновик ниже уже ИСПРАВЛЕН:\n\n" if blocked else ""
-    if not _send_to_author(prefix + send_text, parse_mode=parse_mode):
-        return 1
+    # 11.10.2026 — если выпуск (особенно недельный, или исправленный
+    # Фактчекером черновик) не влез в 4096 знаков, он уходит несколькими
+    # сообщениями по границам блоков, а не теряется из-за ошибки Telegram.
+    message_parts = telegram_render.split_message(prefix + send_text)
+    if len(message_parts) > 1:
+        logger.warning("Выпуск длиннее лимита Telegram — уходит %s сообщениями", len(message_parts))
+    for part in message_parts:
+        if not _send_to_author(part, parse_mode=parse_mode):
+            return 1
     logger.info("Выпуск отправлен автору в личку (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
 
     if blocked:
@@ -257,9 +307,9 @@ def main() -> int:
         report = factchecker.format_factcheck_report(factcheck)
         _send_to_author(report, parse_mode=None)
 
-    record = build_issue_record(stories, draft, final_draft, factcheck, blocked, reason)
+    record = build_issue_record(stories, draft, final_draft, factcheck, blocked, reason, kind=kind)
     archive.append_issue(record)
-    logger.info("Выпуск записан в archive/issues.jsonl (status=sent_to_author)")
+    logger.info("Выпуск записан в archive/issues.jsonl (kind=%s, status=sent_to_author)", kind)
 
     return 0
 
