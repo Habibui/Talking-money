@@ -13,7 +13,7 @@ import re
 import anthropic
 
 from . import config
-from .llm_json import call_json_role
+from .llm_json import call_json_role, call_text_role
 
 logger = logging.getLogger(__name__)
 
@@ -459,14 +459,10 @@ def summarize_digest(queue_items: list) -> str | None:
     headlines = "\n".join(f"- {it['headline_ru']}" for it in queue_items)
 
     try:
-        response = client.messages.create(
-            model=config.LLM_MODEL,
-            max_tokens=100,
-            system=DIGEST_INTRO_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": headlines}],
-        )
-        raw = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
+        raw = call_text_role(
+            client, config.LLM_MODEL_AUX, DIGEST_INTRO_SYSTEM_PROMPT, headlines,
+            max_tokens=100, role_name="Интро дайджеста", timeout=30.0,
+            fallback_model=config.LLM_MODEL,
         ).strip()
         return raw.strip('"«» ') or None
     except Exception as exc:
@@ -522,14 +518,10 @@ def confirm_same_event(new_text: str, candidate_text: str) -> bool | None:
     user_content = f"Новый текст:\n{new_text}\n\nУже опубликованный текст:\n{candidate_text}"
 
     try:
-        response = client.messages.create(
-            model=config.LLM_MODEL,
-            max_tokens=5,
-            system=DEDUP_CHECK_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        raw = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
+        raw = call_text_role(
+            client, config.LLM_MODEL_AUX, DEDUP_CHECK_SYSTEM_PROMPT, user_content,
+            max_tokens=5, role_name="Проверка дублей", timeout=15.0,
+            fallback_model=config.LLM_MODEL,
         ).strip().lower()
         if raw.startswith("yes"):
             return True
@@ -579,14 +571,10 @@ def fix_abbreviations(headline_ru: str, comment_ru: str, found: dict) -> tuple[s
     )
 
     try:
-        response = client.messages.create(
-            model=config.LLM_MODEL,
-            max_tokens=400,
-            system=ABBREVIATION_FIX_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        raw = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
+        raw = call_text_role(
+            client, config.LLM_MODEL_AUX, ABBREVIATION_FIX_SYSTEM_PROMPT, user_content,
+            max_tokens=400, role_name="Правка аббревиатур", timeout=15.0,
+            fallback_model=config.LLM_MODEL,
         ).strip()
 
         if raw.startswith("```"):

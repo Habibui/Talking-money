@@ -87,6 +87,10 @@ jobs:
           # 08.10.2026 — модель фильтра (по умолчанию Haiku 5.5); откат:
           # V1_MODEL_SCREEN=claude-haiku-4-5-20251001
           V1_MODEL_SCREEN: ${{ vars.V1_MODEL_SCREEN }}
+          # 12.10.2026 — модель вспомогательных вызовов (интро дайджеста,
+          # проверка дублей, правка аббревиатур); по умолчанию Haiku 5.5.
+          # Откат: V1_MODEL_AUX=claude-haiku-4-5-20251001
+          V1_MODEL_AUX: ${{ vars.V1_MODEL_AUX }}
         run: python main.py
 
       - name: Закоммитить обновлённое состояние

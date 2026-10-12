@@ -511,3 +511,72 @@ def call_json_role(
             return None
 
     return None
+
+
+def call_text_role(
+    client,
+    model: str,
+    system_prompt: str,
+    user_content: str,
+    *,
+    max_tokens: int,
+    role_name: str,
+    timeout: float,
+    fallback_model: str | None = None,
+) -> str:
+    """12.10.2026 — вызов модели для коротких вспомогательных задач, где
+    нужен сырой текст ответа, а не JSON (интро дайджеста, yes/no по дублям,
+    правка аббревиатур; JSON парсит сам вызывающий код). Те же правила
+    совместимости, что в call_json_role: thinking явно `disabled` (кроме
+    моделей из _THINKING_MANDATORY_MODELS и тех, что уже отклонили поле),
+    при 400 про thinking — повтор без поля, при недоступной модели (404 или
+    400 со словом model) — переход на fallback_model; всё пишется в лог
+    WARNING. Один запрос без повторов по max_tokens: вызывающий код при
+    любой ошибке сам решает, что делать (во всех трёх случаях — запасное
+    поведение без блокировки публикации). Исключение API пробрасывается
+    наружу. Возвращает текст ответа (может быть пустым)."""
+    if fallback_model and model in _DEAD_MODELS:
+        model = fallback_model
+    response = None
+    for _compat in range(3):
+        extra_body = {}
+        if model not in _NO_THINKING_FIELD:
+            extra_body["thinking"] = _thinking_config(model)
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_content}],
+                timeout=timeout,
+                extra_body=extra_body,
+            )
+            break
+        except Exception as api_exc:
+            msg = str(api_exc).lower()
+            status = getattr(api_exc, "status_code", None)
+            if status == 400 and "thinking" in msg and "thinking" in extra_body:
+                logger.warning(
+                    "%s: модель %s отклонила поле thinking (%s) — повтор без него",
+                    role_name, model, api_exc,
+                )
+                _NO_THINKING_FIELD.add(model)
+                continue
+            if (
+                fallback_model and model != fallback_model
+                and (status == 404 or (status == 400 and "model" in msg))
+            ):
+                logger.warning(
+                    "%s: модель %s недоступна (%s) — переключаюсь на %s",
+                    role_name, model, api_exc, fallback_model,
+                )
+                _DEAD_MODELS.add(model)
+                model = fallback_model
+                continue
+            raise
+    if response is None:
+        raise RuntimeError("не удалось получить ответ модели")
+    _log_usage(role_name, model, response)
+    return "".join(
+        block.text for block in response.content if getattr(block, "type", "") == "text"
+    )

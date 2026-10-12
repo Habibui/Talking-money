@@ -84,6 +84,16 @@ LLM_MODEL = "claude-haiku-4-5-20251001"
 # идут прямым client.messages.create без управления thinking, а как Haiku 5.5
 # ведёт себя без него, не проверено.
 LLM_MODEL_SCREEN = os.environ.get("V1_MODEL_SCREEN") or "claude-haiku-5-5"
+
+# 12.10.2026 — вспомогательные вызовы v1 (интро дайджеста, подтверждение
+# дублей, точечная правка аббревиатур) на Haiku 5.5. Идут через
+# llm_json.call_text_role: thinking явно отключён, при 400 про thinking —
+# повтор без поля, при недоступной модели — переход на LLM_MODEL (Haiku 4.5);
+# всё пишется в лог WARNING. Откат без правки кода: переменная репозитория
+# V1_MODEL_AUX=claude-haiku-4-5-20251001. Однопроходный запасной путь
+# (_translate_and_comment_single) намеренно остаётся на LLM_MODEL: это
+# страховка на случай сбоя новых моделей.
+LLM_MODEL_AUX = os.environ.get("V1_MODEL_AUX") or "claude-haiku-5-5"
 # or, а не значение по умолчанию у get(): GitHub подставляет пустую строку,
 # если переменная репозитория не задана (см. publish.yml).
 LLM_MODEL_WRITER = os.environ.get("V1_MODEL_WRITER") or "claude-sonnet-5"
