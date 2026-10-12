@@ -172,7 +172,14 @@ def main() -> int:
         merge_state_with_origin(branch, jsonl_paths)
         stage_existing(all_paths)
 
-        run(["git", "reset", "--soft", f"origin/{branch}"], check=True)
+        # 12.10.2026 — ВАЖНО: --mixed, а не --soft. С --soft индекс оставался
+        # деревом СТАРОГО коммита, и в новый коммит вместе с нашими файлами
+        # попадал откат всех остальных файлов, которые успел изменить
+        # конкурентный запуск (08:01 МСК 12.10: v2 откатил очередь дайджеста,
+        # posted.json и digest_meta у v1 -> v1 опубликовал дайджест и горячую
+        # новость повторно). С --mixed индекс = свежий origin, а в коммит
+        # попадают только файлы, которые мы добавляем сами ниже.
+        run(["git", "reset", "--mixed", f"origin/{branch}"], check=True)
         stage_existing(all_paths)
 
         if run(["git", "diff", "--cached", "--quiet"], check=False).returncode == 0:
