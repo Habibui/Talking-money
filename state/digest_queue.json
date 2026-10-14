@@ -1058,5 +1058,15 @@
     "comment_digest_ru": "**Deutsche Bank поднял прогноз инфляции в Британии на 2027 год** — намёк на то, что Банку Англии придётся дольше держать ставку высокой.",
     "importance": 2,
     "deferred_count": 0
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "TSMC уже отчитался рекордной выручкой за третий квартал — а аналитики считают, что это не предел",
+    "comment_ru": "JPMorgan и Citigroup уверены, что крупнейший в мире производитель чипов для Nvidia, Apple и прочих продолжит наращивать выручку и дальше. По сути это ставка на то, что спрос на ИИ-чипы ещё долго не насытится — **один завод на Тайване фактически остаётся барометром всего мирового спроса на технологии**, и если прогноз не оправдается, нервничать будет вся биржа, а не только акционеры TSMC.",
+    "link": "https://www.marketwatch.com/story/what-analysts-are-watching-with-key-semiconductor-maker-tsmc-set-to-report-results-c161e86b?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Аналитики JPMorgan и Citigroup ждут от TSMC роста выручки и после уже рекордного третьего квартала** — ставка на то, что спрос на ИИ-чипы ещё долго не насытится.",
+    "importance": 3,
+    "deferred_count": 0
   }
 ]
