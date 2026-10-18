@@ -171,7 +171,9 @@ def _make_weekly_variant(stories, notes_by_id, last_titles, unlimited: bool) -> 
     сбое любой из двух ролей (сбой самой проверки — не то же самое, что
     «проверка прошла», поэтому без Фактчекера вариант не отправляется)."""
     name = "вариант 2 (без лимита)" if unlimited else "вариант 1 (одно сообщение)"
-    draft = analyst.write_issue(stories, notes_by_id, weekly=True, weekly_unlimited=unlimited)
+    draft = analyst.write_issue(
+        stories, notes_by_id, weekly=True, weekly_unlimited=unlimited, weekly_period=week_label(),
+    )
     if draft is None:
         logger.error("Аналитик не вернул результат — %s не сформирован", name)
         return None
@@ -240,7 +242,7 @@ def _run_weekly(stories, notes_by_id, last_titles) -> int:
     архив пишется вариант 1 (его блоки читает Отборщик в следующие недели),
     вариант 2 кладётся в ту же запись отдельным полем."""
     two = config.V2_WEEKLY_TWO_VARIANTS
-    limited_stories = stories[:config.V2_WEEKLY_LIMITED_STORIES]
+    limited_stories = selector.pick_limited_stories(stories, config.V2_WEEKLY_LIMITED_STORIES)
 
     logger.info("=== Шаги 2-3: Аналитик + Фактчекер (%s) ===", "два варианта параллельно" if two else "один вариант")
     with ThreadPoolExecutor(max_workers=2) as pool:

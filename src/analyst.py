@@ -294,6 +294,11 @@ WEEKLY_ADDENDUM = """
   prices (инфляция, цены потребителей). Значок по коду подставит программа:
   эмодзи в самих текстах (title, what, meaning, hook) НЕ ставь.
 - Блоки идут по убыванию важности.
+{period_rule}
+- Поле "link" в этом выпуске всегда null: связку между блоками выражай внутри
+  "meaning" или "for_us", отдельной строкой она не выводится.
+- «for_us» опирается ТОЛЬКО на блоки этого выпуска и называет, на какой из
+  них держится вывод; фактов, которых нет в блоках, туда не добавляй.
 {limits}
 - Правило 16 для этого запуска: `new_fact` — новое по сравнению с прошлым
   недельным выпуском.
@@ -302,11 +307,12 @@ WEEKLY_ADDENDUM = """
 """
 
 
-_WEEKLY_LIMIT_LIMITED = """- Правило 14 для этого запуска: не больше 4 блоков, общий объём не больше
-  {max_chars} знаков (оформление добавит ещё около 250), одно сообщение.
-  Если не влезает, убирай лишние сюжеты целиком, начиная с наименее
-  важного, а не сжимай все блоки сразу. Программа тоже уберёт последний
-  блок, если выпуск не влезет в одно сообщение."""
+_WEEKLY_LIMIT_LIMITED = """- Правило 14 для этого запуска: не больше {max_blocks} блоков, общий объём не
+  больше {max_chars} знаков (оформление добавит ещё около 250), одно
+  сообщение; на блок приходится примерно 900–1000 знаков, не больше 6–7
+  предложений. Блок про российскую экономику (topic russia), если он среди
+  переданных сюжетов, ОБЯЗАТЕЛЕН, даже когда он наименее важный: пиши его
+  короче других, но не убирай. Программа тоже защитит его от обрезки."""
 _WEEKLY_LIMIT_FREE = """- Правило 14 для этого запуска ОТМЕНЕНО: ограничений по числу блоков и по
   объёму нет. Разбери КАЖДЫЙ переданный сюжет (один блок на сюжет) и пиши
   столько, сколько нужно, чтобы разбор был содержательным; выпуск уйдёт
@@ -314,10 +320,25 @@ _WEEKLY_LIMIT_FREE = """- Правило 14 для этого запуска О�
   растягивай блок ради объёма, лишней воды и повторов не добавляй."""
 
 
-def _weekly_addendum(unlimited: bool = False) -> str:
-    """unlimited=True — вариант 2 тестового режима (без ограничения объёма)."""
-    limits = _WEEKLY_LIMIT_FREE if unlimited else _WEEKLY_LIMIT_LIMITED.format(max_chars=config.V2_WEEKLY_MAX_CHARS)
-    return WEEKLY_ADDENDUM.format(limits=limits)
+_WEEKLY_PERIOD_RULE = """- Период выпуска — {period}. Блок открывай событиями ЭТОГО периода. Данные
+  за более ранний срок (прошлая неделя, прошлый месяц) годятся только как
+  точка сравнения внутри блока («неделей раньше было 10»), но не как главный
+  факт и не как заголовок блока. Если заметка сообщает итог прошлой недели, а
+  новых данных за этот период по линии нет, это не основание для блока."""
+
+
+def _weekly_addendum(unlimited: bool = False, period: str | None = None) -> str:
+    """unlimited=True — вариант 2 тестового режима (без ограничения объёма).
+    period — «12–18 октября»: даётся Аналитику явно, чтобы он не открывал блок
+    данными за прошлую неделю (выпуск 18.10.2026)."""
+    limits = (
+        _WEEKLY_LIMIT_FREE if unlimited
+        else _WEEKLY_LIMIT_LIMITED.format(
+            max_blocks=config.V2_WEEKLY_LIMITED_STORIES, max_chars=config.V2_WEEKLY_MAX_CHARS,
+        )
+    )
+    period_rule = _WEEKLY_PERIOD_RULE.format(period=period) if period else ""
+    return WEEKLY_ADDENDUM.format(limits=limits, period_rule=period_rule)
 
 
 
@@ -358,6 +379,7 @@ def write_issue(
     on_usage=None,
     weekly: bool = False,
     weekly_unlimited: bool = False,
+    weekly_period: str | None = None,
 ) -> dict | None:
     """stories — отобранные Отборщиком сюжеты (selected_story_ids из его
     ответа, уже отфильтрованные вызывающим кодом). notes_by_id — {note_id:
@@ -426,7 +448,7 @@ def write_issue(
     use_model = model or config.MODEL_ANALYST
     use_effort = effort if effort is not None else config.MODEL_ANALYST_EFFORT
 
-    system_prompt = SYSTEM_PROMPT + _weekly_addendum(weekly_unlimited) if weekly else SYSTEM_PROMPT
+    system_prompt = SYSTEM_PROMPT + _weekly_addendum(weekly_unlimited, weekly_period) if weekly else SYSTEM_PROMPT
 
     data = call_json_role(
         client, use_model, system_prompt, user_content,

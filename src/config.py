@@ -463,5 +463,9 @@ V2_WEEKLY_MAX_CHARS = 3500
 # уходит несколькими сообщениями. Отключается переменной репозитория
 # V2_WEEKLY_TWO_VARIANTS=0 (останется только вариант 1) — без правки кода.
 V2_WEEKLY_TWO_VARIANTS = (os.environ.get("V2_WEEKLY_TWO_VARIANTS") or "1") != "0"
-V2_WEEKLY_LIMITED_STORIES = 4
+# 18.10.2026 — вариант 1 урезан до 3 блоков: с 4 блоками выпуск не влезал в
+# одно сообщение, и обрезка снимала последний блок — российский, на который
+# опирался раздел «для нас». Российский сюжет теперь обязателен (см.
+# selector.pick_limited_stories) и защищён от обрезки.
+V2_WEEKLY_LIMITED_STORIES = 3
 V2_WEEKLY_MAX_STORIES = 6

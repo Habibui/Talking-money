@@ -166,6 +166,14 @@ WEEKLY_ADDENDUM = """
 - Чтобы ответ не разрастался: в массив `stories` включай только сюжеты с
   ru_relevance 2 или 3 (остальные не перечисляй), а `why_grouped` пиши не
   длиннее 12 слов.
+- В каждый сюжет добавь поле "is_russian": true, если ГЛАВНЫЙ предмет сюжета —
+  российская экономика (решения и прогнозы ЦБ РФ, ставка, рубль, инфляция и
+  цены в России, российские компании и отрасли); false, если это зарубежное
+  событие с российским следствием (санкции, мировые цены, решения ФРС).
+- Если среди линий недели есть сюжет с "is_russian": true и ru_relevance 2 или
+  3, он ОБЯЗАТЕЛЬНО попадает в selected_story_ids, даже если по важности он
+  не в первой тройке: российский читатель получает из недельного выпуска
+  прежде всего разбор своей экономики.
 """
 
 
@@ -270,6 +278,21 @@ def select_stories(
                 logger.warning("Отборщик: ru_relevance=%r у сюжета %r вне 0-3 — игнорируем", rel, story.get("story_id"))
             story["ru_relevance"] = None
     return data
+
+
+def pick_limited_stories(stories: list[dict], n: int) -> list[dict]:
+    """18.10.2026 — сюжеты для ограниченного (одно сообщение) варианта
+    недельного выпуска: первые n по важности, но если среди них нет
+    российского (`is_russian`, см. WEEKLY_ADDENDUM), а среди остальных есть —
+    он заменяет последний из n (порядок по важности сохраняется). Иначе
+    обрезка по объёму снимала бы российский блок, как в выпуске 18.10."""
+    head = list(stories[:n])
+    if any(s.get("is_russian") for s in head):
+        return head
+    ru = next((s for s in stories[n:] if s.get("is_russian")), None)
+    if ru is not None and head:
+        head[-1] = ru
+    return head
 
 
 def apply_gates(selection: dict, limit: int = 4) -> tuple[list[dict], list[str]]:

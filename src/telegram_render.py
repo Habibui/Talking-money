@@ -244,8 +244,8 @@ def _weekly_block_html(block: dict) -> str:
     lines = [f"{emoji} {title}", block["what"]]
     if block.get("meaning"):
         lines.append(f"👉 {block['meaning']}")
-    if block.get("link"):
-        lines.append(strip_block_refs(block["link"]))
+    # поле link (связка с другим блоком) в недельном выпуске не выводится: отдельной
+    # строкой под 👉 она читалась как потерянный хвост (выпуск 18.10.2026)
     return "\n".join(lines)
 
 
@@ -282,6 +282,9 @@ def render_weekly_html(issue: dict, period: str, limit: int | None = WEEKLY_SAFE
     (решение автора 11.10.2026), поле watch_next игнорируется."""
     blocks = list(issue.get("blocks") or [])
     protected = set(issue.get("hook_block_refs") or [])
+    # 18.10.2026 — российский блок тоже не убирается: раздел «для нас» опирается
+    # на него (в выпуске 18.10 обрезка сняла его, и вывод повис без базы)
+    protected |= {i for i, b in enumerate(blocks) if b.get("topic") == "russia"}
     dropped: list[str] = []
     html = _weekly_html(issue, blocks, period)
     while limit is not None and len(_TAG_RE.sub("", html)) > limit and len(blocks) > 1:
