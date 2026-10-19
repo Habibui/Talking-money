@@ -96,6 +96,42 @@ def merge_list_by_key(mine, theirs, key_fn, sort_key=None):
     return merged
 
 
+def _queue_key(item):
+    return (item.get("source"), item.get("link"))
+
+
+def merge_digest_queue(mine, theirs, removed_keys):
+    """19.10.2026 — очередь дайджеста нельзя сливать простым объединением.
+    Флаш дайджеста УДАЛЯЕТ ушедшие новости из очереди; объединение с чужой
+    версией (в которой они ещё лежат) возвращало их обратно: дайджест был
+    опубликован, а очередь не уменьшалась, и те же новости уходили в
+    следующих дайджестах (10 из 30 флашей за 12–19.10, по коммитам, где
+    поменялся только digest_meta.json). Поэтому:
+    - removed_keys — новости, которые наш запуск удалил из очереди (были в
+      ней на старте и пропали): из чужой версии их тоже выбрасываем;
+    - новости, добавленные конкурентным запуском, остаются;
+    - у общей новости берём НАШУ запись (в ней deferred_count после
+      флаша), а не чужую."""
+    if theirs is None:
+        return mine or []
+    if mine is None:
+        return theirs
+    mine_by_key = {_queue_key(it): it for it in mine}
+    out, seen = [], set()
+    for it in theirs:
+        key = _queue_key(it)
+        if key in removed_keys or key in seen:
+            continue
+        seen.add(key)
+        out.append(mine_by_key.get(key, it))
+    for it in mine:
+        key = _queue_key(it)
+        if key not in seen:
+            seen.add(key)
+            out.append(it)
+    return out
+
+
 def merge_digest_meta(mine, theirs):
     if theirs is None:
         return mine
@@ -106,9 +142,11 @@ def merge_digest_meta(mine, theirs):
     return {"last_flush_key": (max(mine_key, theirs_key) or None)}
 
 
-def merge_state_with_origin(branch):
+def merge_state_with_origin(branch, removed_queue_keys=frozenset()):
     """Перечитывает текущие (наши) файлы с диска, сравнивает с версией на
-    origin/<branch> и сохраняет слитый результат обратно на диск."""
+    origin/<branch> и сохраняет слитый результат обратно на диск.
+    removed_queue_keys — новости, которые этот запуск удалил из очереди
+    дайджеста (см. merge_digest_queue)."""
     mine = {p: load_json(p) for p in STATE_FILES}
     theirs = {p: git_show(f"origin/{branch}", p) for p in STATE_FILES}
 
@@ -116,10 +154,10 @@ def merge_state_with_origin(branch):
         "state/posted.json": merge_posted(
             mine["state/posted.json"], theirs["state/posted.json"]
         ),
-        "state/digest_queue.json": merge_list_by_key(
+        "state/digest_queue.json": merge_digest_queue(
             mine["state/digest_queue.json"],
             theirs["state/digest_queue.json"],
-            key_fn=lambda it: (it.get("source"), it.get("link")),
+            removed_queue_keys,
         ),
         "state/recent_posts.json": merge_list_by_key(
             mine["state/recent_posts.json"],
@@ -143,6 +181,19 @@ def merge_state_with_origin(branch):
             save_json(path, data)
 
 
+def removed_queue_keys_at_start():
+    """Новости, которые были в очереди на старте запуска (HEAD — коммит, с
+    которого он начался) и которых нет в рабочей копии, то есть ушли в
+    дайджест. Считается один раз до первого слияния: после слияния HEAD уже
+    сдвигается на origin, и по нему удаления не видны."""
+    base = git_show("HEAD", "state/digest_queue.json")
+    mine = load_json("state/digest_queue.json")
+    if base is None or mine is None:
+        return frozenset()
+    mine_keys = {_queue_key(it) for it in mine}
+    return frozenset(_queue_key(it) for it in base) - mine_keys
+
+
 def stage_existing(paths):
     for path in paths:
         if load_json(path) is not None:
@@ -155,6 +206,7 @@ def main() -> int:
     run(["git", "config", "user.name", "talkuyut-dengi-bot"])
     run(["git", "config", "user.email", "actions@users.noreply.github.com"])
 
+    removed_keys = removed_queue_keys_at_start()
     stage_existing(STATE_FILES)
 
     if run(["git", "diff", "--cached", "--quiet"], check=False).returncode == 0:
@@ -174,7 +226,7 @@ def main() -> int:
             break
 
         run(["git", "fetch", "origin", branch], check=True)
-        merge_state_with_origin(branch)
+        merge_state_with_origin(branch, removed_keys)
         stage_existing(STATE_FILES)
 
         # переносим наши изменения поверх свежего origin, чтобы коммит не
