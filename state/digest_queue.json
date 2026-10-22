@@ -3398,5 +3398,15 @@
     "comment_digest_ru": "**Японские инвесторы пятую неделю подряд продают зарубежные облигации и несут деньги домой** — для рынка трежерис это минус один крупный покупатель, а занимать соответственно становится дороже.",
     "importance": 2,
     "deferred_count": 0
+  },
+  {
+    "source": "Investing.com",
+    "headline_ru": "Tesla и Nvidia вложили $2,8 млрд в южнокорейского производителя чипов Samsung Electro-Mechanics",
+    "comment_ru": "Samsung Electro-Mechanics — не та Samsung, что делает смартфоны, а отдельная контора из той же группы, которая производит компоненты для чипов. И именно в неё Tesla и Nvidia закинули $2,8 млрд. **Обе компании по уши зависят от поставок чипов для ИИ и электромобилей, так что это не инвестиция ради дивидендов, а страховка на случай, если тайваньские и прочие мощности снова встанут**.",
+    "link": "https://www.investing.com/news/economy-news/samsung-electromechanics-gets-28-billion-chip-investment-from-tesla-nvidia-report-says-4964838",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Tesla и Nvidia вложили $2,8 млрд в Samsung Electro-Mechanics** — похоже, обе компании предпочли заранее купить себе место в очереди за чипами, чем потом судорожно искать поставщика.",
+    "importance": 2,
+    "deferred_count": 0
   }
 ]
