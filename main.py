@@ -26,6 +26,7 @@ import sys
 import time
 
 from src import config, dedup, llm, sources, state, telegram_bot, timeutil
+from src import digest_queue as digest_queue_policy
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +76,11 @@ def maybe_flush_digest() -> None:
         return
 
     digest_queue = state.load_digest_queue()
+    if digest_queue:
+        # 25.10.2026: срок жизни + схлопывание повторов (src/digest_queue.py)
+        digest_queue, _prune_stats = digest_queue_policy.prune_queue(digest_queue)
+        if not digest_queue:
+            state.save_digest_queue([])
     if not digest_queue:
         # нечего слать, но час всё равно отмечаем — иначе следующий запуск
         # в этом же часе (через 15 минут) будет проверять это же условие снова
@@ -91,8 +97,8 @@ def maybe_flush_digest() -> None:
         if leftover:
             logger.info(
                 "[DRY_RUN] %d новостей не влезли в лимит сообщения — "
-                "остаются в очереди до следующего дайджеста (приоритет выше, "
-                "чем у свежих).", len(leftover),
+                "остаются в очереди до следующего дайджеста (если не истечёт "
+                "срок жизни, см. src/digest_queue.py).", len(leftover),
             )
         state.save_digest_queue(leftover)
         meta["last_flush_key"] = flush_key
@@ -113,7 +119,7 @@ def maybe_flush_digest() -> None:
             logger.warning(
                 "Дайджест отправлен (%d новостей), но %d наименее значимых "
                 "не влезли в одно сообщение и перенесены на следующий "
-                "дайджест (с повышенным приоритетом) — если это происходит "
+                "дайджест (до истечения срока жизни) — если это происходит "
                 "систематически (не в единичный 'горячий' день), см. "
                 "telegram_bot.build_digest_message, докстринг, про "
                 "возможные следующие шаги.",

@@ -112,6 +112,9 @@ def append_to_digest_queue(
         "comment_digest_ru": comment_digest_ru,
         "importance": importance,
         "deferred_count": 0,
+        # 25.10.2026: момент постановки в очередь — для срока жизни (см.
+        # config.DIGEST_TTL_HOURS_*, src/digest_queue.py)
+        "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
     save_digest_queue(queue)
 

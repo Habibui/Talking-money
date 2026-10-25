@@ -318,3 +318,30 @@ def find_ambiguous_match(headline_ru: str, comment_ru: str, recent_posts: list) 
 
     candidates.sort(key=lambda c: c[0], reverse=True)
     return candidates[:AMBIGUOUS_MAX_CANDIDATES]
+
+
+# 25.10.2026 — сравнение новостей ВНУТРИ очереди дайджеста (src/digest_queue.py).
+# Окно recent_posts (48 ч / 60 постов) короче, чем жила очередь, поэтому
+# повтор давней новости мог пройти проверку при постановке в очередь. Те же
+# пороги, что и выше, но токены считаем один раз на новость — очередь может
+# быть в сотни записей, а пар на порядок больше.
+def prepare_text(headline_ru: str, comment_ru: str) -> tuple[set, set]:
+    return _tokenize(f"{headline_ru} {comment_ru}")
+
+
+def classify_pair(prep_a: tuple[set, set], prep_b: tuple[set, set]) -> tuple[str | None, float, int]:
+    """("duplicate" | "ambiguous" | None, jaccard, общих значимых токенов) —
+    те же условия 1/2 (определённый дубль) и 3 (пограничный случай для
+    модели), что в is_near_duplicate/find_ambiguous_match."""
+    tokens_a, salient_a = prep_a
+    tokens_b, salient_b = prep_b
+    if not tokens_a or not tokens_b:
+        return None, 0.0, 0
+    union = tokens_a | tokens_b
+    jaccard = len(tokens_a & tokens_b) / len(union) if union else 0.0
+    salient = len(salient_a & salient_b)
+    if jaccard >= JACCARD_HIGH or (jaccard >= JACCARD_MED and salient >= 1):
+        return "duplicate", jaccard, salient
+    if salient >= SALIENT_MANY:
+        return "ambiguous", jaccard, salient
+    return None, jaccard, salient
