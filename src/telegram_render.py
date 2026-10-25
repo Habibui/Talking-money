@@ -20,8 +20,10 @@ Telegram Bot API поддерживает не весь HTML, а конкрет�
 в правильном порядке (строгий стек, без "теги пересекаются").
 """
 
+import html as _html
 import logging
 import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from html.parser import HTMLParser
 
 logger = logging.getLogger(__name__)
@@ -216,9 +218,54 @@ WEEKLY_TOPIC_EMOJI = {
 WEEKLY_DEFAULT_EMOJI = "📌"
 WEEKLY_LABEL = "📊 Аналитика недели"
 WEEKLY_DIVIDER = "▬▬▬▬▬▬▬▬▬▬"
-WEEKLY_HASHTAGS = "#аналитика #итогинедели"
+# 25.10.2026 — один хештег вместо двух: метка «📊 Аналитика недели» уже
+# отличает пост, а по хештегу ленту аналитики можно открыть одним нажатием.
+WEEKLY_HASHTAGS = "#аналитика"
 # Telegram считает до 4096 знаков текста без разметки; берём с запасом.
 WEEKLY_SAFE_LIMIT = 4000
+
+
+# 25.10.2026 — ссылки на источники в недельном выпуске. Аналитик пишет
+# в тексте метку [[Издание|source_id]] (URL модель не пишет — только id
+# заметки), а настоящую ссылку подставляет код из заметки. Метка без
+# известного id или с небезопасным URL превращается в простое название.
+SOURCE_MARKER_RE = re.compile(r"\[\[([^\[\]|]{1,60})\|([0-9A-Za-z_\-]{4,64})\]\]")
+_TRACKING_PARAM_PREFIXES = ("utm_", "at_medium", "at_campaign", "at_")
+
+
+def clean_source_url(url: str | None) -> str | None:
+    """http(s)-ссылка без трекинговых параметров RSS (at_medium=RSS и т.п.)
+    или None, если ссылка пустая или небезопасная."""
+    if not url or not isinstance(url, str):
+        return None
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if not k.lower().startswith(_TRACKING_PARAM_PREFIXES)]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+
+def linkify_sources(text: str, links: dict | None = None) -> str:
+    """Метки [[Издание|id]] -> <a href="...">Издание</a> (если ссылка для id
+    известна и безопасна) или просто «Издание». links — {id: url}."""
+    def repl(m):
+        name = _html.escape(m.group(1).strip(), quote=False)
+        url = clean_source_url((links or {}).get(m.group(2)))
+        if not url:
+            return name
+        return f'<a href="{_html.escape(url, quote=True)}">{name}</a>'
+    return SOURCE_MARKER_RE.sub(repl, text or "")
+
+
+def strip_source_markers(text: str) -> str:
+    """Метки -> только название издания (для hook, заголовков и памяти)."""
+    return SOURCE_MARKER_RE.sub(lambda m: m.group(1).strip(), text or "")
+
+
+def plain_length(html: str) -> int:
+    """Длина текста без разметки — так её считает Telegram для лимита 4096."""
+    return len(_TAG_RE.sub("", html))
 
 
 def restore_block_topics(original: dict, corrected: dict) -> dict:
@@ -236,39 +283,41 @@ def restore_block_topics(original: dict, corrected: dict) -> dict:
     return corrected
 
 
-def _weekly_block_html(block: dict) -> str:
+def _weekly_block_html(block: dict, links: dict | None = None) -> str:
     emoji = WEEKLY_TOPIC_EMOJI.get(block.get("topic"), WEEKLY_DEFAULT_EMOJI)
-    title = block["title"].strip()
+    title = strip_source_markers(block["title"]).strip()
     if "<b>" not in title:  # модель обязана оборачивать сама (правило 13), но не полагаемся
         title = f"<b>{title}</b>"
-    lines = [f"{emoji} {title}", block["what"]]
+    lines = [f"{emoji} {title}", linkify_sources(block["what"], links)]
     if block.get("meaning"):
-        lines.append(f"👉 {block['meaning']}")
+        lines.append(f"👉 {linkify_sources(block['meaning'], links)}")
     # поле link (связка с другим блоком) в недельном выпуске не выводится: отдельной
     # строкой под 👉 она читалась как потерянный хвост (выпуск 18.10.2026)
     return "\n".join(lines)
 
 
-def _weekly_html(issue: dict, blocks: list[dict], period: str) -> str:
+def _weekly_html(issue: dict, blocks: list[dict], period: str, links: dict | None = None) -> str:
     # Первая строка — hook (едкий, в голосе канала: его видно в уведомлении),
     # плашка с периодом — второй строкой, как метка, а не заголовок.
     parts = [
-        f"🔥 <b>{issue['hook']}</b>",
+        f"🔥 <b>{strip_source_markers(issue['hook'])}</b>",
         f"<i>{WEEKLY_LABEL} · {period}</i>",
         WEEKLY_DIVIDER,
         "",
     ]
     for block in blocks:
-        parts.extend([_weekly_block_html(block), ""])
+        parts.extend([_weekly_block_html(block, links), ""])
     parts.append(WEEKLY_DIVIDER)
     parts.append("")
     if issue.get("for_us"):
-        parts.extend([f"🎯 <b>Что это значит для нас</b>\n{issue['for_us']}", ""])
+        parts.extend([f"🎯 <b>Что это значит для нас</b>\n{linkify_sources(issue['for_us'], links)}", ""])
     parts.append(WEEKLY_HASHTAGS)
     return "\n".join(parts).strip()
 
 
-def render_weekly_html(issue: dict, period: str, limit: int | None = WEEKLY_SAFE_LIMIT) -> tuple[str, list[str]]:
+def render_weekly_html(
+    issue: dict, period: str, limit: int | None = WEEKLY_SAFE_LIMIT, links: dict | None = None,
+) -> tuple[str, list[str]]:
     """Недельный выпуск. period — «5–11 октября».
 
     limit — потолок длины (знаков текста без разметки): если текст не
@@ -286,7 +335,7 @@ def render_weekly_html(issue: dict, period: str, limit: int | None = WEEKLY_SAFE
     # на него (в выпуске 18.10 обрезка сняла его, и вывод повис без базы)
     protected |= {i for i, b in enumerate(blocks) if b.get("topic") == "russia"}
     dropped: list[str] = []
-    html = _weekly_html(issue, blocks, period)
+    html = _weekly_html(issue, blocks, period, links)
     while limit is not None and len(_TAG_RE.sub("", html)) > limit and len(blocks) > 1:
         idx = next((i for i in range(len(blocks) - 1, -1, -1) if i not in protected), None)
         if idx is None:
@@ -294,5 +343,5 @@ def render_weekly_html(issue: dict, period: str, limit: int | None = WEEKLY_SAFE
         dropped.append(_TAG_RE.sub("", blocks[idx].get("title", "")))
         del blocks[idx]
         protected = {i if i < idx else i - 1 for i in protected}
-        html = _weekly_html(issue, blocks, period)
+        html = _weekly_html(issue, blocks, period, links)
     return html, dropped

@@ -143,6 +143,12 @@ def load_last_issue_titles(n: int, kind: str = "daily") -> list[str]:
     return titles
 
 
+import re as _re_markers
+
+# метка источника недельного выпуска [[Издание|id]] (см. telegram_render)
+_SRC_MARKER_RE = _re_markers.compile(r"\[\[([^\[\]|]{1,60})\|([0-9A-Za-z_\-]{4,64})\]\]")
+
+
 def _strip_tags(text: str) -> str:
     import re
     return re.sub(r"<[^>]+>", "", text or "").strip()
@@ -167,7 +173,7 @@ def load_last_issue_summaries(n: int, max_what_chars: int = 220, kind: str = "da
             continue
         for b in blocks:
             title = _strip_tags(b.get("title", ""))
-            what = _strip_tags(b.get("what", ""))
+            what = _strip_tags(_SRC_MARKER_RE.sub(lambda m: m.group(1).strip(), b.get("what", "")))
             if len(what) > max_what_chars:
                 what = what[:max_what_chars].rsplit(" ", 1)[0] + "…"
             out.append(f"[{date}] {title} — {what}")

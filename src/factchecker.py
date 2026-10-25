@@ -17,6 +17,7 @@ import logging
 import anthropic
 
 from . import archive, config
+from .telegram_render import SOURCE_MARKER_RE
 from .llm_json import call_json_role
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,13 @@ WEEKLY_ADDENDUM = """
   другому и не к «сейчас».
 - «Вчера», «сегодня», «на днях», «недавно» в тексте — замечание: замени на
   день недели и число из источника.
+- Метки вида [[Издание|source_id]] в тексте — будущие ссылки на источник. Для
+  каждой метки проверь: издание в метке совпадает с источником заметки
+  source_id, и утверждение рядом с меткой действительно взято из ЭТОЙ
+  заметки. Если нет — замени source_id на верный (из набора источников) или,
+  если подходящего нет, оставь просто название издания без метки. Исправленные
+  и непроверенные метки возвращай в corrected_draft в том же формате, без
+  изменений; ничего, кроме id из набора источников, в метку не подставляй.
 """
 
 
@@ -199,6 +207,14 @@ def collect_used_note_ids(draft: dict) -> set:
     ids.update(draft.get("for_us_source_ids", []) or [])
     for block in draft.get("blocks", []) or []:
         ids.update(block.get("source_ids", []) or [])
+    # 25.10.2026 — заметки из меток источника [[Издание|id]] в тексте тоже
+    # должны попасть к Фактчекеру: он проверяет, что ссылка ведёт на ту
+    # заметку, из которой взято утверждение
+    texts = [draft.get("hook", ""), draft.get("for_us", "")]
+    for block in draft.get("blocks", []) or []:
+        texts.extend([block.get("title", ""), block.get("what", ""), block.get("meaning", "")])
+    for text in texts:
+        ids.update(m.group(2) for m in SOURCE_MARKER_RE.finditer(text or ""))
     return ids
 
 

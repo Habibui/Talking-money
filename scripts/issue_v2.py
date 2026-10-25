@@ -166,6 +166,37 @@ def build_issue_record(stories, draft, final_draft, factcheck, blocked, reason, 
     return record
 
 
+def _fit_weekly_draft(draft: dict, period: str) -> dict:
+    """25.10.2026 — вариант «в одном сообщении»: если готовый выпуск (с
+    оформлением) длиннее лимита Telegram, просим сжать текст (до двух раз),
+    а не выбрасываем целый блок. Если не вышло — возвращаем лучший из
+    имеющихся черновиков; render_weekly_html тогда сработает как страховка и
+    уберёт блок. Фактчекер проверяет уже сжатый текст."""
+    target = telegram_render.WEEKLY_SAFE_LIMIT - 100
+    for attempt in (1, 2):
+        html, _ = telegram_render.render_weekly_html(draft, period, limit=None)
+        length = telegram_render.plain_length(html)
+        if length <= telegram_render.WEEKLY_SAFE_LIMIT:
+            return draft
+        logger.warning(
+            "Недельный выпуск %s знаков > %s — просим сжать до %s (попытка %s/2)",
+            length, telegram_render.WEEKLY_SAFE_LIMIT, target, attempt,
+        )
+        tightened = analyst.tighten_issue(draft, length, target)
+        if tightened is None:
+            logger.error("Сжатие выпуска не удалось — оставляем исходный черновик")
+            return draft
+        # служебные поля блоков, которые модель могла потерять
+        telegram_render.restore_block_topics(draft, tightened)
+        for old_b, new_b in zip(draft.get("blocks") or [], tightened.get("blocks") or []):
+            if not new_b.get("source_ids") and old_b.get("source_ids"):
+                new_b["source_ids"] = old_b["source_ids"]
+        draft = tightened
+    html, _ = telegram_render.render_weekly_html(draft, period, limit=None)
+    logger.warning("После сжатия выпуск всё ещё %s знаков", telegram_render.plain_length(html))
+    return draft
+
+
 def _make_weekly_variant(stories, notes_by_id, last_titles, unlimited: bool) -> dict | None:
     """Аналитик → Фактчекер для одного варианта недельного выпуска. None при
     сбое любой из двух ролей (сбой самой проверки — не то же самое, что
@@ -177,6 +208,8 @@ def _make_weekly_variant(stories, notes_by_id, last_titles, unlimited: bool) -> 
     if draft is None:
         logger.error("Аналитик не вернул результат — %s не сформирован", name)
         return None
+    if not unlimited:
+        draft = _fit_weekly_draft(draft, week_label())
     used_note_ids = factchecker.collect_used_note_ids(draft)
     factcheck_notes = {nid: notes_by_id[nid] for nid in used_note_ids if nid in notes_by_id}
     factcheck = factchecker.check_issue(draft, factcheck_notes, last_titles, weekly=True)
@@ -190,6 +223,8 @@ def _make_weekly_variant(stories, notes_by_id, last_titles, unlimited: bool) -> 
     return {
         "stories": stories, "draft": draft, "final": final_draft,
         "factcheck": factcheck, "blocked": blocked, "reason": reason,
+        # {id заметки: ссылка} для меток источника [[Издание|id]] в тексте
+        "links": {nid: n.get("link") for nid, n in notes_by_id.items() if n.get("link")},
     }
 
 
@@ -201,6 +236,7 @@ def _deliver_weekly_variant(variant: dict, header_note: str | None, limited: boo
     rendered, dropped_blocks = telegram_render.render_weekly_html(
         variant["final"], week_label(),
         limit=telegram_render.WEEKLY_SAFE_LIMIT if limited else None,
+        links=variant.get("links"),
     )
     if dropped_blocks:
         logger.warning("Вариант не влезал в одно сообщение — убраны блоки: %s", "; ".join(dropped_blocks))
