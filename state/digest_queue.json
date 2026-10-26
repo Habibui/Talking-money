@@ -812,5 +812,16 @@
     "importance": 2,
     "deferred_count": 0,
     "queued_at": "2026-10-26T17:46:03+00:00"
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "ИИ жрёт столько электричества, что Bloom Energy и Solaris Energy могут на этом неплохо заработать",
+    "comment_ru": "MarketWatch называет конкретных бенефициаров энергетического голода дата-центров: Bloom Energy делает топливные элементы, Solaris Energy — мобильные газовые электростанции, и обе компании оказались ровно там, где ИИ-гигантам сейчас не хватает мощностей. **Пока весь рынок спорит, лопнет пузырь в ИИ или нет, эти двое продают не сам ИИ, а лопаты и кирки для золотой лихорадки** — то есть зарабатывают независимо от того, окупятся ли нейросети вообще.",
+    "link": "https://www.marketwatch.com/story/these-energy-stocks-are-poised-to-profit-from-an-imminent-ai-power-crunch-00c1a50d?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Bloom Energy и Solaris Energy — кандидаты в бенефициары энергодефицита дата-центров**: пока рынок гадает про ИИ-пузырь, эти продают инфраструктуру для электричества, которого ИИ-гигантам уже не хватает.",
+    "importance": 3,
+    "deferred_count": 0,
+    "queued_at": "2026-10-26T18:16:06+00:00"
   }
 ]
