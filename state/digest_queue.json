@@ -955,5 +955,16 @@
     "importance": 3,
     "deferred_count": 0,
     "queued_at": "2026-10-28T21:45:44+00:00"
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "Lumentum взлетела на новостях о возможной продаже Marvell — сделку могут закрыть уже на следующей неделе",
+    "comment_ru": "Bloomberg пишет, что компании могут договориться буквально через неделю — и этого слуха хватило, чтобы акции Lumentum резко подскочили ещё до подписания хоть одной бумаги. **Рынок в очередной раз платит вперёд за сделку, которой формально ещё нет** — а если переговоры сорвутся, весь этот рост так же быстро сдуется.",
+    "link": "https://www.marketwatch.com/story/lumentums-stock-pops-as-investors-cheer-a-possible-sale-to-marvell-07c1d0e8?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Акции Lumentum подскочили на слухах Bloomberg о возможной сделке с Marvell уже на следующей неделе** — классическая игра на опережение: сначала покупают на слухах, а подтверждать или опровергать будут потом.",
+    "importance": 3,
+    "deferred_count": 0,
+    "queued_at": "2026-10-28T22:15:49+00:00"
   }
 ]
