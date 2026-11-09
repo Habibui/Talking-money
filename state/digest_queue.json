@@ -460,5 +460,16 @@
     "importance": 3,
     "deferred_count": 0,
     "queued_at": "2026-11-09T20:45:51+00:00"
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "Акции Nvidia, Micron и Sandisk обвалились — аналитики спорят, распродажа это или подарок судьбы",
+    "comment_ru": "Часть аналитиков в один голос кричит «покупайте, это перепуганный рынок ошибся», другие пожимают плечами и ждут ещё одного дна. Характерно, что единого мнения нет даже внутри одного сектора памяти и чипов — **Micron и Sandisk делают похожий бизнес, но спорят по ним с одинаковым жаром**, а значит, никто на самом деле не знает, где дно, просто у каждого своя красивая табличка в Excel.",
+    "link": "https://www.marketwatch.com/story/analysts-say-these-chip-stocks-are-bargains-is-it-time-to-buy-fb5fdde8?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Аналитики разошлись во мнениях по обвалу Nvidia, Micron и Sandisk** — одни видят дешёвые акции, другие предупреждают, что падение ещё не закончилось.",
+    "importance": 3,
+    "deferred_count": 0,
+    "queued_at": "2026-11-09T21:00:43+00:00"
   }
 ]
