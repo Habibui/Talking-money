@@ -228,6 +228,8 @@ def select_stories(
         logger.info("Отборщик: нет заметок с importance >= %s, пропускаем вызов", config.V2_SELECTOR_MIN_IMPORTANCE)
         return {"stories": [], "selected_story_ids": [], "connection": None}
 
+    notes = cap_notes(notes, config.V2_SELECTOR_MAX_NOTES_WEEKLY if weekly else config.V2_SELECTOR_MAX_NOTES)
+
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=60.0)
 
     lookback_lines = last_issue_context if last_issue_context else last_issue_titles
@@ -241,14 +243,19 @@ def select_stories(
             f"Заметки за последние семь суток:\n{_format_notes(notes, with_dates=True)}\n\n"
             f"Содержание прошлых недельных выпусков (для шага 4):\n{lookback_block}\n"
         )
-        attempts = [6000, 12000]
+        attempts = [8000, 16000, 24000]
     else:
         system_prompt = SYSTEM_PROMPT
         user_content = (
             f"Заметки за период с прошлого выпуска:\n{_format_notes(notes)}\n\n"
             f"Содержание трёх последних выпусков (для шага 4):\n{lookback_block}\n"
         )
-        attempts = [4500, 9000]
+        attempts = [6000, 12000, 20000]
+
+    # 10.11.2026 — напоминание о формате в КОНЦЕ запроса (системный промпт
+    # не трогаем, он закреплён после ревью): на большом входе модель
+    # начинала ответ с рассуждения вслух и упиралась в лимит токенов.
+    user_content += "\nОтвет — один JSON-объект по схеме, начиная с «{». Без рассуждений и текста до или после него.\n"
 
     # 26.09.2026 — первый реальный DRY_RUN: при max_tokens=2000 и 37 заметках
     # на входе ответ обрывался настолько рано, что текстового блока не
@@ -278,6 +285,24 @@ def select_stories(
                 logger.warning("Отборщик: ru_relevance=%r у сюжета %r вне 0-3 — игнорируем", rel, story.get("story_id"))
             story["ru_relevance"] = None
     return data
+
+
+def cap_notes(notes: list[dict], limit: int) -> list[dict]:
+    """10.11.2026 — потолок числа заметок на входе Отборщика. 10.11 в
+    ежедневное окно попало 57 заметок с importance >= 3 (день CPI и IPO
+    Anthropic), Отборщик дважды упёрся в лимит токенов и выпуск не вышел.
+    Оставляем самые важные, при равной важности — самые свежие; порядок
+    внутри оставшихся сохраняем исходный."""
+    if limit <= 0 or len(notes) <= limit:
+        return notes
+    ranked = sorted(
+        range(len(notes)),
+        key=lambda i: (notes[i].get("importance") or 0, str(notes[i].get("extracted_at") or "")),
+        reverse=True,
+    )
+    keep = set(ranked[:limit])
+    logger.warning("Отборщик: заметок %d > потолка %d — оставляем самые важные и свежие", len(notes), limit)
+    return [n for i, n in enumerate(notes) if i in keep]
 
 
 def pick_limited_stories(stories: list[dict], n: int) -> list[dict]:

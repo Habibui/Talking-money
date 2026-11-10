@@ -94,6 +94,11 @@ LLM_MODEL_SCREEN = os.environ.get("V1_MODEL_SCREEN") or "claude-haiku-5-5"
 # (_translate_and_comment_single) намеренно остаётся на LLM_MODEL: это
 # страховка на случай сбоя новых моделей.
 LLM_MODEL_AUX = os.environ.get("V1_MODEL_AUX") or "claude-haiku-5-5"
+# 10.11.2026: точечная проверка «одно ли это событие» (llm.confirm_same_event)
+# вынесена с Haiku на Sonnet 5: 10.11 Haiku ответил "no" на явный повтор
+# (профицит Китая $1 трлн у NYT и Investing.com). Вызовов ~100 в сутки по
+# нескольким сотням токенов — разница в цене копеечная.
+LLM_MODEL_DEDUP = os.environ.get("V1_MODEL_DEDUP") or "claude-sonnet-5"
 # or, а не значение по умолчанию у get(): GitHub подставляет пустую строку,
 # если переменная репозитория не задана (см. publish.yml).
 LLM_MODEL_WRITER = os.environ.get("V1_MODEL_WRITER") or "claude-sonnet-5"
@@ -413,6 +418,9 @@ V2_MAX_SEEN_IDS = 5000
 # Отборщик берёт на вход заметки с importance >= этого порога (см.
 # «Вход» в format-v2-prompts-draft.md — «все заметки … importance ≥ 3»).
 V2_SELECTOR_MIN_IMPORTANCE = 3
+# 10.11.2026: потолок числа заметок на входе Отборщика (см. selector.cap_notes)
+V2_SELECTOR_MAX_NOTES = 45
+V2_SELECTOR_MAX_NOTES_WEEKLY = 90
 
 # Сколько последних выпусков передавать Отборщику для проверки повтора
 # сюжета (шаг 4 промпта). 03.10.2026: было 2, стало 3 — при одном выпуске в

@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 # час-два) уже разобрали под другим источником, а не ловить дубли через
 # сутки (это уже не задача Сборщика, а Отборщика на этапе группировки).
 _RECENT_WINDOW_HOURS = 6
+# сколько неудачных разборов ПОДРЯД считаем сбоем Claude API, а не плохими статьями
+_OUTAGE_CONSECUTIVE_FAILURES = 3
 
 
 def _as_dedup_shape(card: dict) -> dict:
@@ -63,7 +65,7 @@ def run(dry_run: bool = True) -> dict:
     "extracted": N, "failed": N} — для лога/отчёта DRY_RUN."""
     stats = {
         "fetched": 0, "skipped_seen": 0, "skipped_duplicate": 0,
-        "extracted": 0, "failed": 0,
+        "extracted": 0, "failed": 0, "outage": False,
     }
 
     items = sources.fetch_all()
@@ -72,6 +74,8 @@ def run(dry_run: bool = True) -> dict:
     seen_ids = archive.load_seen()
     recent_cards = archive.load_cards_since(_RECENT_WINDOW_HOURS)
     recent_shapes = [_as_dedup_shape(c) for c in recent_cards]
+
+    consecutive_failed_ids: list = []
 
     for item in items:
         item_id = archive.compute_card_id(item["source"], item["link"])
@@ -115,7 +119,27 @@ def run(dry_run: bool = True) -> dict:
         # одной проблемной статье при каждом запуске.
         if note is None:
             stats["failed"] += 1
+            consecutive_failed_ids.append(item_id)
+            if len(consecutive_failed_ids) >= _OUTAGE_CONSECUTIVE_FAILURES:
+                # 10.11.2026 — 30.10–9.11 Claude API не отвечал ~10 суток, а
+                # Сборщик помечал каждую статью разобранной, так что новости
+                # этих дней потеряны безвозвратно, и никто об этом не узнал
+                # (collect_v2 всегда возвращал 0). Несколько неудач подряд —
+                # это сбой API, а не «плохие статьи»: возвращаем их id в
+                # очередь на повтор, останавливаем прогон и сообщаем наверх.
+                for failed_id in consecutive_failed_ids:
+                    seen_ids.discard(failed_id)
+                stats["failed"] -= len(consecutive_failed_ids)
+                stats["outage"] = True
+                logger.error(
+                    "Сборщик: %d неудачных разборов подряд — похоже на сбой Claude API "
+                    "(ключ/баланс/лимиты/верификация), а не на плохие статьи; прогон остановлен, "
+                    "эти статьи повторим в следующий раз",
+                    len(consecutive_failed_ids),
+                )
+                break
             continue
+        consecutive_failed_ids = []
 
         card = {
             "id": item_id,

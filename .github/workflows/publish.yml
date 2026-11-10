@@ -91,6 +91,7 @@ jobs:
           # проверка дублей, правка аббревиатур); по умолчанию Haiku 5.5.
           # Откат: V1_MODEL_AUX=claude-haiku-4-5-20251001
           V1_MODEL_AUX: ${{ vars.V1_MODEL_AUX }}
+          V1_MODEL_DEDUP: ${{ vars.V1_MODEL_DEDUP }}
         run: python main.py
 
       - name: Закоммитить обновлённое состояние
