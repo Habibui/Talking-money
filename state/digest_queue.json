@@ -889,5 +889,16 @@
     "importance": 2,
     "deferred_count": 1,
     "queued_at": "2026-11-11T02:45:42+00:00"
+  },
+  {
+    "source": "Investing.com",
+    "headline_ru": "Goldman Sachs ждёт от ФРС ещё одного повышения ставки — уже в марте",
+    "comment_ru": "Заголовок без единой цифры и подробностей, но суть простая: в Goldman Sachs считают, что ФРС на этом не остановится и поднимет ставку ещё раз в марте. **Рынок уже не первую неделю гадает, кто в итоге победит — ястребы или голуби в ФРС, и прогноз Goldman явно подливает масла в пользу первых.**",
+    "link": "https://www.investing.com/news/economy-news/goldman-expects-additional-fed-rate-hike-in-march-5017688",
+    "topic_tag": "central_banks",
+    "comment_digest_ru": "**Goldman Sachs прогнозирует новое повышение ставки ФРС в марте** — ещё один голос в пользу того, что ФРС не спешит останавливаться.",
+    "importance": 3,
+    "deferred_count": 0,
+    "queued_at": "2026-11-11T05:15:41+00:00"
   }
 ]
