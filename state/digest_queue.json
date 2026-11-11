@@ -944,5 +944,16 @@
     "importance": 2,
     "deferred_count": 0,
     "queued_at": "2026-11-11T15:45:50+00:00"
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "Anthropic выходит на IPO — и инвесторы выстраиваются в очередь, несмотря на разговоры о пузыре в ИИ",
+    "comment_ru": "Anthropic — создатель Claude и главный конкурент OpenAI — начал роад-шоу перед размещением акций, и, судя по всему, крупные фонды готовы нести деньги даже на фоне постоянных разговоров о переоценённости всего ИИ-сектора. **Получается забавно: все вокруг две недели пишут про пузырь и шаткие мультипликаторы, а спрос на новую ИИ-компанию как будто этого разговора не слышал вообще**.",
+    "link": "https://www.marketwatch.com/story/anthropics-ipo-roadshow-kicks-off-and-the-big-money-is-already-lining-up-7cdd4f8b?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Спрос на IPO Anthropic оказался очень сильным** — несмотря на то, что весь рынок вторую неделю обсуждает пузырь в ИИ-акциях.",
+    "importance": 3,
+    "deferred_count": 0,
+    "queued_at": "2026-11-11T16:15:59+00:00"
   }
 ]
