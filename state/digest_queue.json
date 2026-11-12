@@ -647,5 +647,16 @@
     "importance": 3,
     "deferred_count": 0,
     "queued_at": "2026-11-12T17:15:51+00:00"
+  },
+  {
+    "source": "WSJ",
+    "headline_ru": "Юрист Cravath заработал $70 000 на инсайде по сделке Paramount–Warner Bros — и попался",
+    "comment_ru": "Сотрудник одной из топовых юридических фирм Уолл-стрит, Cravath, торговал акциями на основе закрытой информации о сделках клиентов — включая покупку Paramount киностудии Warner Bros — и получил на этом $70 000 прибыли. Сумма смешная по меркам слияний на миллиарды, но именно из-за таких утечек крупные сделки держат в таком секрете: **даже один юрист с доступом к документам способен слить информацию раньше, чем новость попадёт в газеты**.",
+    "link": "https://www.wsj.com/finance/regulation/cravath-employee-is-charged-with-insider-trading-using-confidential-deal-information-a5cdd0a9?mod=rss_markets_main",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Сотрудник юрфирмы Cravath заработал $70 000 на инсайдерской торговле вокруг сделки Paramount–Warner Bros** — мелкая сумма, но большая дыра в конфиденциальности сделок на Уолл-стрит.",
+    "importance": 2,
+    "deferred_count": 0,
+    "queued_at": "2026-11-12T17:30:42+00:00"
   }
 ]
