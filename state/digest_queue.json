@@ -702,5 +702,16 @@
     "importance": 3,
     "deferred_count": 0,
     "queued_at": "2026-11-12T11:30:43+00:00"
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "Стратег предупреждает: техно-акции может тряхнуть вверх, но это не повод туда нырять",
+    "comment_ru": "Джим Торн из Wellington-Altus говорит прямо: если техногиганты после просадки резко отскочат, не надо радостно закупаться на этом отскоке. **Такие резкие рывки вверх обычно и случаются внутри падающего тренда, а не в начале нового роста** — классическая ловушка для тех, кто боится пропустить ракету.",
+    "link": "https://www.marketwatch.com/story/tech-stocks-may-soon-enjoy-a-violent-bounce-but-one-strategist-warns-investors-not-to-take-the-bait-1a41f9c4?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Резкий отскок техноакций вверх — по словам стратега Wellington-Altus, это скорее ловушка внутри падения, чем начало нового роста**, так что бежать закупаться на эмоциях не стоит.",
+    "importance": 2,
+    "deferred_count": 0,
+    "queued_at": "2026-11-12T11:45:37+00:00"
   }
 ]
