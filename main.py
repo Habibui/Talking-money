@@ -181,6 +181,7 @@ def main() -> int:
     skipped_duplicates = 0
     skipped_near_duplicates = 0
     translate_failures = 0
+    rejected_by_verify = 0
     for item in new_items:
         # пробуем прочитать саму статью (полный текст через trafilatura,
         # либо og:description как запасной вариант) — это даёт модели больше
@@ -209,6 +210,14 @@ def main() -> int:
         if translated is None:
             logger.warning("Пропускаем (не удалось перевести): %s — %s", item["source"], item["title"])
             translate_failures += 1
+            continue
+
+        if translated.get("skip_reason"):
+            # 14.11.2026: отброшено правилом пайплайна (например, источник не
+            # отдал текст статьи, а важность ниже порога) — не «не по теме»
+            logger.info("Пропускаем (%s): %s — %s", translated["skip_reason"], item["source"], item["title"])
+            state.mark_posted(st, [item])
+            state.save_state(st)
             continue
 
         if not translated.get("relevant", True):
@@ -323,6 +332,24 @@ def main() -> int:
             skipped_near_duplicates += 1
             continue
 
+        urgency = translated.get("urgency", "routine")
+
+        # 14.11.2026: срочный пост перед публикацией проверяется на
+        # противоречия с источником (см. llm.verify_and_fix; разбор поста про
+        # Хуанга от 13.11 — заголовок «он уходит», комментарий «остаётся
+        # главой»). Стоит ПОСЛЕ проверок на дубли (не тратить вызов на то, что
+        # не выйдет) и ДО правки сокращений (текст может быть переписан).
+        if urgency == "breaking" and config.V1_VERIFY_BREAKING:
+            if not llm.verify_and_fix(item, translated):
+                logger.warning(
+                    "Пропускаем (пост дважды не прошёл проверку фактов): %s — %s",
+                    item["source"], item["title"],
+                )
+                state.mark_posted(st, [item])
+                state.save_state(st)
+                rejected_by_verify += 1
+                continue
+
         # 23.09.2026: страховка после перевода — усиление SYSTEM_PROMPT
         # (коммит 6746f7d, 22.09.2026) само по себе не удержало модель от
         # того, чтобы иногда оставлять известные сокращения как есть (BofA,
@@ -354,8 +381,6 @@ def main() -> int:
                     ", ".join(found_abbrevs), item["source"], item["title"],
                 )
 
-        urgency = translated.get("urgency", "routine")
-
         if urgency == "breaking":
             text = telegram_bot.build_message(item, translated)
 
@@ -375,7 +400,8 @@ def main() -> int:
                 state.mark_posted(st, [item])
                 state.save_state(st)  # сохраняем сразу, чтобы при сбое не задвоить пост
                 recent_posts = state.append_recent_post(
-                    recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"]
+                    recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"],
+                    urgency="breaking",
                 )
                 posted_count += 1
                 # story_status пишем в лог явно (не только для "duplicate", как
@@ -405,7 +431,8 @@ def main() -> int:
             importance=translated.get("importance"),
         )
         recent_posts = state.append_recent_post(
-            recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"]
+            recent_posts, item["source"], translated["headline_ru"], translated["comment_ru"],
+            urgency="routine",
         )
         state.mark_posted(st, [item])
         state.save_state(st)
@@ -432,6 +459,34 @@ def main() -> int:
             "Все %d новых заголовков не удалось перевести — похоже на системный сбой "
             "(например, не оплачен/истёк ключ Anthropic), а не на единичную ошибку.",
             translate_failures,
+        )
+        return 1
+
+    # 14.11.2026: тихая остановка публикаций. Проверка выше срабатывает,
+    # только если не перевелись ВСЕ новые заголовки. Но если сломался только
+    # автор (например, недоступна его модель), а фильтр работает и часть
+    # новостей отсеивает как «не по теме», запуск считался успешным, хотя в
+    # канал не уходило ничего. Считаем запуски подряд, где сбои были, а
+    # текстов не написано ни одного; на третьем — падаем с уведомлением и
+    # потом напоминаем раз в ~4 часа, пока не починится.
+    meta = state.load_digest_meta()
+    streak = int(meta.get("writer_fail_streak") or 0)
+    if translate_failures > 0 and posted_count == 0:
+        streak += 1
+    elif posted_count > 0:
+        streak = 0
+    if streak != int(meta.get("writer_fail_streak") or 0):
+        meta["writer_fail_streak"] = streak
+        state.save_digest_meta(meta)
+    if translate_failures > 0 and posted_count == 0 and (
+        streak == config.V1_WRITER_FAIL_STREAK_ALERT
+        or (streak > config.V1_WRITER_FAIL_STREAK_ALERT and streak % 16 == 0)
+    ):
+        logger.error(
+            "Уже %d запусков подряд новости не удаётся написать (сбоев в этом "
+            "запуске: %d, написано: 0) — публикации фактически стоят. Проверь "
+            "баланс и доступность моделей Anthropic (особенно модель автора, "
+            "config.LLM_MODEL_WRITER).", streak, translate_failures,
         )
         return 1
 

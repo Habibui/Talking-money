@@ -167,17 +167,23 @@ def save_recent_posts(posts: list) -> None:
         f.write("\n")
 
 
-def append_recent_post(posts: list, source: str, headline_ru: str, comment_ru: str) -> list:
+def append_recent_post(posts: list, source: str, headline_ru: str, comment_ru: str,
+                       urgency: str | None = None) -> list:
     """Добавляет запись в переданный в память список (не перечитывает файл —
     вызывающий код сам ведёт posts в течение всего прогона, чтобы более ранние
     новости этого же запуска тоже участвовали в сравнении для более поздних)
     и сразу сохраняет на диск. Возвращает обновлённый список."""
-    posts = posts + [{
+    entry = {
         "source": source,
         "headline_ru": headline_ru,
         "comment_ru": comment_ru,
         "posted_at": datetime.now(timezone.utc).isoformat(),
-    }]
+    }
+    # 14.11.2026: "breaking" / "routine" — чтобы считать, сколько отдельных
+    # срочных постов уже вышло по одной истории (config.V1_BREAKING_MAX_PER_STORY_24H).
+    if urgency:
+        entry["urgency"] = urgency
+    posts = posts + [entry]
     save_recent_posts(posts)
     return posts
 

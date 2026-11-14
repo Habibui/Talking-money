@@ -139,7 +139,13 @@ def merge_digest_meta(mine, theirs):
         return theirs
     mine_key = mine.get("last_flush_key") or ""
     theirs_key = theirs.get("last_flush_key") or ""
-    return {"last_flush_key": (max(mine_key, theirs_key) or None)}
+    merged = {"last_flush_key": (max(mine_key, theirs_key) or None)}
+    # 14.11.2026: счётчик запусков подряд со сбоями автора (main.py) — берём
+    # значение текущего запуска, если оно есть, иначе то, что на origin.
+    for src in (theirs, mine):
+        if "writer_fail_streak" in src:
+            merged["writer_fail_streak"] = src["writer_fail_streak"]
+    return merged
 
 
 def merge_state_with_origin(branch, removed_queue_keys=frozenset()):
