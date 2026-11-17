@@ -119,5 +119,16 @@
     "importance": 4,
     "deferred_count": 0,
     "queued_at": "2026-11-17T22:00:52+00:00"
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "После сбоя Microsoft и остановки авиарейсов американцы бросились закупаться впрок в Costco",
+    "comment_ru": "Аналитики Mizuho зафиксировали ускорение продаж товаров для «экстренных запасов» в Costco — после того как упали сервисы Microsoft и встали рейсы по всей стране. **Один айтишный сбой — и люди уже тащат из магазина тушёнку и воду, будто готовятся не к перебою в интернете, а к концу света** — хотя по факту это просто очередной день, когда что-то в облаке отвалилось.",
+    "link": "https://www.marketwatch.com/story/costco-is-benefiting-from-apocalyptic-concerns-as-customers-stock-up-on-goods-analysts-say-24f611ab?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Аналитики Mizuho отметили всплеск продаж «товаров на случай апокалипсиса» в Costco** — люди закупаются впрок после сбоя Microsoft и остановки рейсов по США, реагируя на обычную ИТ-поломку как на конец света.",
+    "importance": 2,
+    "deferred_count": 0,
+    "queued_at": "2026-11-17T23:00:51+00:00"
   }
 ]
