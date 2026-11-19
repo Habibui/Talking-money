@@ -147,6 +147,8 @@ def _select_digest_blocks(queue_items: list) -> tuple[set, list]:
             add_len = len(block)
         elif included_blocks and current_len + add_len > budget:
             continue  # не влезла — пропускаем, но проверяем следующие по приоритету
+        if len(included_blocks) >= config.DIGEST_MAX_ITEMS:
+            break  # 19.11.2026: не больше DIGEST_MAX_ITEMS новостей в дайджесте
         included_indices.add(idx)
         included_blocks.append(block)
         current_len += add_len

@@ -153,7 +153,7 @@ def main() -> int:
     logger.info("Загружено состояние: %d известных id, bootstrapped=%s", len(st["ids"]), st["bootstrapped"])
 
     logger.info("Забираем заголовки из источников: %s", ", ".join(s["name"] for s in config.SOURCES))
-    items = sources.fetch_all()
+    items = sources.fetch_all(pipeline="v1")
     logger.info("Всего получено %d заголовков из всех источников", len(items))
 
     if not st["bootstrapped"]:

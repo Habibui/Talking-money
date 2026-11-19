@@ -216,9 +216,11 @@ def fetch_telegram_channel(source: dict) -> list:
     return items
 
 
-def fetch_all() -> list:
+def fetch_all(pipeline: str | None = None) -> list:
+    """pipeline: "v1" (лента канала) или "v2" (Сборщик недельной аналитики) —
+    см. поле "pipelines" в config.SOURCES. None — все источники."""
     all_items = []
-    for source in config.SOURCES:
+    for source in config.sources_for(pipeline):
         if source["type"] == "rss":
             all_items.extend(fetch_rss(source))
         elif source["type"] == "telegram":

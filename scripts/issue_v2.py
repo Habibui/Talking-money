@@ -220,15 +220,46 @@ def _make_weekly_variant(stories, notes_by_id, last_titles, unlimited: bool) -> 
     final_draft = factcheck.get("corrected_draft", draft)
     # Фактчекер мог потерять служебное поле topic у блоков (значок темы).
     telegram_render.restore_block_topics(draft, final_draft)
+    # 16.11.2026 — автопубликация. Блокировка относится к ЧЕРНОВИКУ Аналитика,
+    # а в канал идёт уже исправленный текст. Его никто не проверял, поэтому
+    # заблокированный выпуск проверяем второй раз: прошёл — можно публиковать,
+    # не прошёл (или проверка не отработала) — только автору в личку.
+    publishable = not blocked
+    if blocked and not unlimited and config.V2_WEEKLY_AUTOPUBLISH:
+        logger.info("Фактчекер заблокировал черновик (%s) — повторная проверка исправленного текста", reason)
+        second = factchecker.check_issue(final_draft, factcheck_notes, last_titles, weekly=True)
+        if second is None:
+            logger.error("Повторная проверка не отработала — выпуск уйдёт только автору")
+        else:
+            blocked2, reason2 = factchecker.should_block(second)
+            if blocked2:
+                logger.warning("Исправленный текст тоже не прошёл проверку (%s) — выпуск уйдёт только автору", reason2)
+            else:
+                rechecked = second.get("corrected_draft", final_draft)
+                telegram_render.restore_block_topics(draft, rechecked)
+                final_draft = rechecked
+                publishable = True
+                logger.info("Исправленный текст прошёл повторную проверку")
     return {
         "stories": stories, "draft": draft, "final": final_draft,
         "factcheck": factcheck, "blocked": blocked, "reason": reason,
+        "publishable": publishable,
         # {id заметки: ссылка} для меток источника [[Издание|id]] в тексте
         "links": {nid: n.get("link") for nid, n in notes_by_id.items() if n.get("link")},
     }
 
 
-def _deliver_weekly_variant(variant: dict, header_note: str | None, limited: bool) -> bool:
+def _send_to_channel(text: str, parse_mode: str | None = "HTML") -> bool:
+    ok = telegram_bot.send_message(
+        text, chat_id=config.V2_CHANNEL_ID, disable_preview=True, parse_mode=parse_mode,
+        silent=timeutil.is_night_msk(),
+    )
+    if not ok:
+        logger.error("Не удалось опубликовать сообщение в канале (chat_id=%s)", config.V2_CHANNEL_ID)
+    return ok
+
+
+def _deliver_weekly_variant(variant: dict, header_note: str | None, limited: bool, publish: bool = False) -> bool:
     """Отправка одного варианта автору. Пояснения (метка варианта, пометка о
     блокировке Фактчекера, список убранных блоков) уходят ОТДЕЛЬНЫМ коротким
     сообщением перед постом, а сам пост — чистым: автор пересылает его в
@@ -251,10 +282,44 @@ def _deliver_weekly_variant(variant: dict, header_note: str | None, limited: boo
         send_text, parse_mode = telegram_render.strip_telegram_html(rendered), None
 
     notes = [header_note] if header_note else []
-    if variant["blocked"]:
+    do_publish = publish and variant.get("publishable", not variant["blocked"])
+    if variant["blocked"] and do_publish:
+        notes.append("ℹ️ Фактчекер заблокировал черновик; исправленный текст прошёл повторную проверку.")
+    elif variant["blocked"]:
         notes.append("⚠️ Фактчекер заблокировал бы публикацию — текст ниже уже ИСПРАВЛЕН.")
+        if publish:
+            notes.append(
+                "🚫 В канал автоматически НЕ опубликовано: исправленный текст не прошёл "
+                "повторную проверку. Проверь разбор ниже и перешли пост вручную, если согласен."
+            )
     if dropped_blocks:
         notes.append("✂️ Не влезло в одно сообщение, убраны блоки: " + "; ".join(dropped_blocks))
+    # 16.11.2026: в выпуске 15.11 Фактчекер при правке растянул первую строку
+    # со 146 до 185 знаков. Промпты поправлены; это страховка на случай повтора.
+    hook_len = len(telegram_render.strip_source_markers(variant["final"].get("hook") or ""))
+    if hook_len > config.V2_WEEKLY_HOOK_MAX_CHARS:
+        logger.warning("Первая строка выпуска %s знаков > %s", hook_len, config.V2_WEEKLY_HOOK_MAX_CHARS)
+        notes.append(
+            f"📏 Первая строка {hook_len} знаков при лимите {config.V2_WEEKLY_HOOK_MAX_CHARS} — "
+            "в уведомлении обрежется. Лучше скопировать пост и сократить её, а не пересылать как есть."
+        )
+    if do_publish:
+        # 16.11.2026 — автопубликация: пост уходит в канал, автору — короткое
+        # подтверждение (и служебные пометки, если есть). Если канал не принял
+        # первое же сообщение — ниже обычная доставка автору в личку, а запуск
+        # считается неуспешным (сработает уведомление о сбое и дозапуск).
+        parts = telegram_render.split_message(send_text)
+        if _send_to_channel(parts[0], parse_mode=parse_mode):
+            rest_ok = all(_send_to_channel(p, parse_mode=parse_mode) for p in parts[1:])
+            variant["published"] = True
+            done = "✅ Недельный выпуск опубликован в канале." if rest_ok else (
+                "⚠️ Недельный выпуск опубликован в канале НЕ ПОЛНОСТЬЮ: часть сообщений не ушла, проверь канал."
+            )
+            _send_to_author("\n".join([done] + notes), parse_mode=None)
+            return rest_ok
+        notes.append("🚫 Канал не принял пост — публикация не удалась, текст ниже. Перешли вручную.")
+        variant["publish_failed"] = True
+
     if notes and not _send_to_author("\n".join(notes), parse_mode=None):
         return False
 
@@ -266,7 +331,7 @@ def _deliver_weekly_variant(variant: dict, header_note: str | None, limited: boo
     if variant["blocked"]:
         logger.warning("Фактчек заблокировал бы публикацию: %s — отправляем разбор отдельным сообщением", variant["reason"])
         _send_to_author(factchecker.format_factcheck_report(variant["factcheck"]), parse_mode=None)
-    return True
+    return not variant.get("publish_failed", False)
 
 
 def _run_weekly(stories, notes_by_id, last_titles) -> int:
@@ -296,6 +361,8 @@ def _run_weekly(stories, notes_by_id, last_titles) -> int:
     if v1 is not None:
         ok = _deliver_weekly_variant(
             v1, "🧪 ВАРИАНТ 1 — с ограничением объёма, всё в одном сообщении" if two else None, limited=True,
+            # в тестовом режиме «два варианта» автопубликации нет: автор выбирает сам
+            publish=config.V2_WEEKLY_AUTOPUBLISH and not two,
         ) and ok
     elif two:
         _send_to_author("🧪 ВАРИАНТ 1 (с ограничением объёма) не сформирован — сбой Аналитика или Фактчекера, см. лог.", parse_mode=None)
@@ -305,23 +372,46 @@ def _run_weekly(stories, notes_by_id, last_titles) -> int:
         ) and ok
     elif two:
         _send_to_author("🧪 ВАРИАНТ 2 (без ограничения объёма) не сформирован — сбой Аналитика или Фактчекера, см. лог.", parse_mode=None)
-    if not ok:
+    published = bool(v1 and v1.get("published"))
+    if not ok and not published:
+        # ничего не ушло в канал — запись в архив не делаем, чтобы дозапуск
+        # (см. config.V2_WEEKLY_GUARD_DAYS) попробовал ещё раз
         return 1
-    logger.info("Недельный выпуск отправлен автору в личку (chat_id=%s)", config.TELEGRAM_AUTHOR_CHAT_ID)
+    logger.info(
+        "Недельный выпуск %s", "опубликован в канале" if published else
+        f"отправлен автору в личку (chat_id={config.TELEGRAM_AUTHOR_CHAT_ID})",
+    )
 
     main_v = v1 if v1 is not None else v2
     record = build_issue_record(
         main_v["stories"], main_v["draft"], main_v["final"], main_v["factcheck"],
         main_v["blocked"], main_v["reason"], kind="weekly",
     )
+    if published:
+        record["status"] = "published"
     if v1 is not None and v2 is not None:
         rec2 = build_issue_record(v2["stories"], v2["draft"], v2["final"], v2["factcheck"], v2["blocked"], v2["reason"], kind="weekly")
         record["variant_unlimited"] = {
             k: rec2[k] for k in ("story_titles", "draft", "factcheck_blocked", "factcheck", "draft_original") if k in rec2
         }
     archive.append_issue(record)
-    logger.info("Выпуск записан в archive/issues.jsonl (kind=weekly, status=sent_to_author)")
-    return 0
+    logger.info("Выпуск записан в archive/issues.jsonl (kind=weekly, status=%s)", record["status"])
+    return 0 if ok else 1
+
+
+def weekly_already_done(now: datetime | None = None) -> bool:
+    """True, если недельный выпуск за эту неделю уже есть в архиве (не старше
+    config.V2_WEEKLY_GUARD_DAYS суток). Нужен, чтобы запасные запуски (вс 19:35
+    и пн 08:05 МСК) ничего не делали, когда основной отработал."""
+    last = archive.load_last_issues(1, kind="weekly")
+    if not last:
+        return False
+    try:
+        ts = datetime.fromisoformat(last[-1].get("published_at") or "")
+    except ValueError:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - ts).total_seconds() < config.V2_WEEKLY_GUARD_DAYS * 86400
 
 
 def main() -> int:
@@ -338,8 +428,18 @@ def main() -> int:
              "повторный захват уже отобранного сюжета Отборщик отсекает сам через сюжеты прошлых "
              "выпусков, шаг 4 его промпта, так что запас по времени не создаёт риска задвоения)",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="недельный выпуск: сформировать, даже если за эту неделю он уже есть в архиве",
+    )
     args = parser.parse_args()
     weekly = args.weekly
+    if weekly and not args.force and weekly_already_done():
+        logger.info(
+            "Недельный выпуск за эту неделю уже есть в архиве — запасной запуск "
+            "ничего не делает (принудительно: --force)"
+        )
+        return 0
     kind = "weekly" if weekly else "daily"
     window_hours = config.V2_WEEKLY_HOURS if weekly else args.hours
     max_age_hours = config.V2_WEEKLY_HOURS if weekly else config.V2_MAX_NOTE_AGE_HOURS

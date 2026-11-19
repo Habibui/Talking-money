@@ -1409,15 +1409,13 @@ def translate_and_comment(item: dict, recent_posts: list | None = None) -> dict 
             logger.info("Нет текста статьи — в дайджест, не отдельным постом: %s", item["title"])
             result["urgency"] = "routine"
 
-    # Ночью отдельным постом — только самое важное.
-    if (
-        result["urgency"] == "breaking"
-        and timeutil.is_night_msk()
-        and screen["importance"] < config.V1_BREAKING_NIGHT_MIN_IMPORTANCE
-    ):
+    # Отдельным постом — только самое важное (ночь — с 14.11, день — с 19.11).
+    night = timeutil.is_night_msk()
+    min_breaking = config.V1_BREAKING_NIGHT_MIN_IMPORTANCE if night else config.V1_BREAKING_DAY_MIN_IMPORTANCE
+    if result["urgency"] == "breaking" and screen["importance"] < min_breaking:
         logger.info(
-            "Ночь по МСК и важность %s < %s — в утренний дайджест, не отдельным постом: %s",
-            screen["importance"], config.V1_BREAKING_NIGHT_MIN_IMPORTANCE, item["title"],
+            "%s, важность %s < %s — в дайджест, не отдельным постом: %s",
+            "Ночь по МСК" if night else "День", screen["importance"], min_breaking, item["title"],
         )
         result["urgency"] = "routine"
 
@@ -1434,6 +1432,17 @@ def translate_and_comment(item: dict, recent_posts: list | None = None) -> dict 
                 breaking_before, item["title"],
             )
             result["urgency"] = "routine"
+
+    # 19.11.2026 (вариант «Б»): маловажная рутина в дайджест из 8 новостей не
+    # проходит — не тратим на неё вызов автора.
+    if result["urgency"] == "routine" and screen["importance"] < config.V1_DIGEST_MIN_IMPORTANCE:
+        logger.info(
+            "Рутина с важностью %s < %s — не публикуем: %s — %s",
+            screen["importance"], config.V1_DIGEST_MIN_IMPORTANCE, item["source"], item["title"],
+        )
+        result["relevant"] = False
+        result["skip_reason"] = "рутина ниже порога важности дайджеста"
+        return result
 
     story_context = related_posts[-config.V1_WRITER_STORY_CONTEXT_MAX:]
     written = _write_post(item, result, recent_posts, story_context=story_context)

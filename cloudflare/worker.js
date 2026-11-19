@@ -60,6 +60,11 @@ function modeForCron(cron) {
   if (cron === "0 * * * *") return "collect";
   if (cron === "0 19 * * *") return "issue";
   if (cron === "5 15 * * SUN") return "weekly";
+  // 16.11.2026 — запасные запуски недельного выпуска (вс 19:35 и пн 08:05 МСК).
+  // Если основной отработал, скрипт сам выходит, ничего не делая
+  // (scripts/issue_v2.py, weekly_already_done).
+  if (cron === "35 16 * * SUN") return "weekly";
+  if (cron === "5 5 * * MON") return "weekly";
   return null;
 }
 

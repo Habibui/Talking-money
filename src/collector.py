@@ -68,7 +68,7 @@ def run(dry_run: bool = True) -> dict:
         "extracted": 0, "failed": 0, "outage": False,
     }
 
-    items = sources.fetch_all()
+    items = sources.fetch_all(pipeline="v2")
     stats["fetched"] = len(items)
 
     seen_ids = archive.load_seen()
