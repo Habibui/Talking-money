@@ -437,7 +437,33 @@ SYSTEM_PROMPT для переводов, п.9 — то же самое прав�
 РФ, Ведомости) вперемешку — не пиши "у нас"/"наш рынок" во фразе-интро, \
 если неясно, к какой стране это относится (см. SYSTEM_PROMPT, п.10).
 
+Пиши сразу саму фразу, которую прочитает подписчик, — она уходит в канал \
+как есть. Не описывай, о чём будет интро, и не комментируй список \
+(плохо: "Заголовки разношёрстные, так что интро о том, что…").
+
 Ответь ТОЛЬКО этой фразой, без пояснений до или после."""
+
+# 19.11.2026: в дайджест 12:00 ушло не интро, а рассуждение модели о нём
+# ("Заголовки разношёрстные, от взломов больниц до GTA 6 и Маска с Warner, так
+# что интро о том, что мир снова сходит с ума…"). Такой ответ отбраковывается:
+# одна повторная попытка, потом нейтральный заголовок.
+_DIGEST_INTRO_META_RE = re.compile(
+    r"интро|заголовк|дайджест|фраз[аеуыо]\b|\bсписок|\bсписк", re.IGNORECASE
+)
+_DIGEST_INTRO_MAX_WORDS = 24
+
+
+def _digest_intro_problem(text: str) -> str | None:
+    """Причина отбраковки интро или None, если фраза годится."""
+    if not text:
+        return "пустой ответ"
+    if "\n" in text:
+        return "несколько строк"
+    if _DIGEST_INTRO_META_RE.search(text):
+        return "служебные слова (модель описала интро вместо того, чтобы написать его)"
+    if len(text.split()) > _DIGEST_INTRO_MAX_WORDS:
+        return f"длиннее {_DIGEST_INTRO_MAX_WORDS} слов"
+    return None
 
 
 def summarize_digest(queue_items: list) -> str | None:
@@ -459,16 +485,25 @@ def summarize_digest(queue_items: list) -> str | None:
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=30.0)
     headlines = "\n".join(f"- {it['headline_ru']}" for it in queue_items)
 
-    try:
-        raw = call_text_role(
-            client, config.LLM_MODEL_AUX, DIGEST_INTRO_SYSTEM_PROMPT, headlines,
-            max_tokens=100, role_name="Интро дайджеста", timeout=30.0,
-            fallback_model=config.LLM_MODEL,
-        ).strip()
-        return raw.strip('"«» ') or None
-    except Exception as exc:
-        logger.error("Не удалось получить интро для дайджеста: %s", exc)
-        return None
+    for attempt in (1, 2):
+        try:
+            raw = call_text_role(
+                client, config.LLM_MODEL_AUX, DIGEST_INTRO_SYSTEM_PROMPT, headlines,
+                max_tokens=100, role_name="Интро дайджеста", timeout=30.0,
+                fallback_model=config.LLM_MODEL,
+            )
+        except Exception as exc:
+            logger.error("Не удалось получить интро для дайджеста: %s", exc)
+            return None
+        text = raw.strip().strip('"«» ').strip()
+        problem = _digest_intro_problem(text)
+        if problem is None:
+            return text
+        logger.warning(
+            "Интро дайджеста отбраковано (попытка %d из 2): %s. Ответ модели: %r",
+            attempt, problem, raw,
+        )
+    return None
 
 
 DEDUP_CHECK_SYSTEM_PROMPT = """\

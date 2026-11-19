@@ -88,7 +88,9 @@ def maybe_flush_digest() -> None:
         state.save_digest_meta(meta)
         return
 
-    intro_ru = llm.summarize_digest(digest_queue)
+    # 19.11.2026: интро пишется только по тем новостям, что войдут в пост,
+    # а не по всей очереди (см. telegram_bot.plan_digest).
+    intro_ru = llm.summarize_digest(telegram_bot.plan_digest(digest_queue))
     digest_message, leftover = telegram_bot.build_digest_message(digest_queue, intro_ru)
     sent_count = len(digest_queue) - len(leftover)
 

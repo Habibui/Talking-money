@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 # в самой строке). Дайджест из нескольких новостей может в него не влезть —
 # тогда режем на несколько сообщений подряд.
 TELEGRAM_TEXT_LIMIT = 4096
+# 19.11.2026: место под интро дайджеста резервируется заранее и не зависит от
+# самой фразы — тогда набор новостей, влезающих в сообщение, известен ДО
+# генерации интро (см. plan_digest), и интро пишется только по ним. Интро
+# длиннее лимита (после HTML-экранирования) заменяется нейтральным заголовком.
+DIGEST_INTRO_MAX_CHARS = 200
+DIGEST_INTRO_FALLBACK = "Что вы пропустили"
 
 
 def _esc(text: str) -> str:
@@ -112,6 +118,52 @@ def _digest_priority(it: dict) -> int:
     return it.get("importance") or 3
 
 
+def _select_digest_blocks(queue_items: list) -> tuple[set, list]:
+    """Какие новости очереди влезают в одно сообщение дайджеста (индексы) и
+    их готовые блоки в порядке вывода. Бюджет считается с резервом под интро
+    максимальной длины (DIGEST_INTRO_MAX_CHARS), поэтому результат не
+    зависит от текста интро — см. plan_digest. Логика отбора — та же, что
+    была внутри build_digest_message до 19.11.2026 (см. его докстринг)."""
+    header_reserved = f"<b>{'x' * DIGEST_INTRO_MAX_CHARS}:</b>\n\n"
+    divider = "\n\n"
+    budget = TELEGRAM_TEXT_LIMIT - len(header_reserved)
+
+    # сортируем по приоритету (выше — раньше), стабильно (Python sort
+    # стабилен). 25.10.2026: при равной важности — свежие вперёд (очередь
+    # хранится от старых к новым, значит больший индекс = свежее).
+    ordered = sorted(enumerate(queue_items), key=lambda pair: (-_digest_priority(pair[1]), -pair[0]))
+
+    included_indices: set = set()
+    included_blocks: list = []
+    current_len = 0
+    for idx, it in ordered:
+        comment_text = it.get("comment_digest_ru") or it["comment_ru"]
+        block = _digest_line(it["source"], comment_text, it["link"], it.get("topic_tag"))
+        add_len = len(block) + (len(divider) if included_blocks else 0)
+        if not included_blocks and len(block) > budget:
+            # защита от единичной аномально длинной новости: лучше обрезать
+            # и отправить дайджест, чем уронить его целиком
+            block = block[: max(budget - 1, 0)] + "…"
+            add_len = len(block)
+        elif included_blocks and current_len + add_len > budget:
+            continue  # не влезла — пропускаем, но проверяем следующие по приоритету
+        included_indices.add(idx)
+        included_blocks.append(block)
+        current_len += add_len
+    return included_indices, included_blocks
+
+
+def plan_digest(queue_items: list) -> list:
+    """19.11.2026: новости, которые реально войдут в ближайший дайджест, в
+    порядке вывода. По ним (а не по всей очереди) пишется интро —
+    llm.summarize_digest. Раньше интро писалось по всей очереди, и 19.11 в
+    12:00 оно упомянуло взлом больниц и GTA 6, хотя эти новости не влезли в
+    сообщение и остались в очереди (18 в очереди, 10 в посте)."""
+    included_indices, _ = _select_digest_blocks(queue_items)
+    ordered = sorted(enumerate(queue_items), key=lambda pair: (-_digest_priority(pair[1]), -pair[0]))
+    return [it for idx, it in ordered if idx in included_indices]
+
+
 def build_digest_message(queue_items: list, intro_ru: str | None = None) -> tuple[str | None, list]:
     """Собирает накопленные рутинные новости в ОДИН пост дайджеста.
     queue_items — список dict с ключами source/headline_ru/comment_ru/link/
@@ -169,39 +221,12 @@ def build_digest_message(queue_items: list, intro_ru: str | None = None) -> tupl
     if not queue_items:
         return None, []
 
-    intro = _esc(intro_ru) if intro_ru else "Что вы пропустили"
+    included_indices, included_blocks = _select_digest_blocks(queue_items)
+    intro = _esc(intro_ru) if intro_ru else ""
+    if not intro or len(intro) > DIGEST_INTRO_MAX_CHARS:
+        intro = DIGEST_INTRO_FALLBACK
     header = f"<b>{intro}:</b>\n\n"
     divider = "\n\n"
-    budget = TELEGRAM_TEXT_LIMIT - len(header)
-
-    # сортируем по приоритету (выше — раньше), стабильно (Python sort
-    # стабилен) — при равном приоритете порядок остаётся исходным
-    # (старые новости вперёд, как и раньше), меняется только то, что
-    # приоритет теперь не всегда равный.
-    # 25.10.2026: при равной важности — свежие вперёд (очередь хранится от
-    # старых к новым, значит больший индекс = свежее); sort стабилен.
-    ordered = sorted(enumerate(queue_items), key=lambda pair: (-_digest_priority(pair[1]), -pair[0]))
-
-    included_indices: set = set()
-    included_blocks: list = []
-    current_len = 0
-    for idx, it in ordered:
-        comment_text = it.get("comment_digest_ru") or it["comment_ru"]
-        block = _digest_line(it["source"], comment_text, it["link"], it.get("topic_tag"))
-        add_len = len(block) + (len(divider) if included_blocks else 0)
-        if not included_blocks and len(block) > budget:
-            # защита от единичной новости, которая сама по себе длиннее
-            # лимита (не должно происходить при обычных длинах
-            # comment_digest_ru — см. llm.py, правило 4 — но лучше обрезать
-            # и отправить дайджест, чем уронить его целиком из-за одной
-            # аномально длинной записи)
-            block = block[: max(budget - 1, 0)] + "…"
-            add_len = len(block)
-        elif included_blocks and current_len + add_len > budget:
-            continue  # эта новость не влезла — пропускаем, но проверяем следующие по приоритету
-        included_indices.add(idx)
-        included_blocks.append(block)
-        current_len += add_len
 
     # leftover собирается в исходном порядке очереди (не в порядке
     # включения по приоритету выше) — чтобы следующий вызов снова видел
