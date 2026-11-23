@@ -64,5 +64,16 @@
     "importance": 3,
     "deferred_count": 0,
     "queued_at": "2026-11-23T13:15:39+00:00"
+  },
+  {
+    "source": "MarketWatch",
+    "headline_ru": "США взялись проверять рейтинги Medicare Advantage — акции UnitedHealth, Humana и CVS посыпались",
+    "comment_ru": "Medicare Advantage — это частные страховые планы для пенсионеров, за которые государство доплачивает страховщикам в зависимости от рейтинга качества и здоровья пациентов, и именно эту систему теперь проверяют на предмет честности бизнес-практик. **Инвесторы отреагировали мгновенно и продают акции всех трёх компаний разом** — потому что если правила игры с рейтингами ужесточат, доходы страховщиков от самой прибыльной части их бизнеса могут заметно просесть.",
+    "link": "https://www.marketwatch.com/story/unitedhealth-humana-and-cvs-stocks-slide-as-u-s-targets-medicare-advantage-ratings-6c2be5bb?mod=mw_rss_topstories",
+    "topic_tag": "markets",
+    "comment_digest_ru": "**Акции UnitedHealth, Humana и CVS падают** после того, как США начали проверять рейтинги программы Medicare Advantage и бизнес-практики страховщиков — инвесторы готовятся к тому, что самая прибыльная часть их выручки может подешеветь.",
+    "importance": 3,
+    "deferred_count": 0,
+    "queued_at": "2026-11-23T13:45:53+00:00"
   }
 ]
